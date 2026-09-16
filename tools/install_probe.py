@@ -12,6 +12,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
+from bridge.adb_runtime import resolve_and_store
 
 GAME_SHA = '110aa2b5cac391c498645e072b0d88729428c2c2845e7e2737ca8ee979059783'
 PROBE_SHA = '91f3719b4bd4d5e9f0f034fbdd823fb3b0676c52e88f6f621ed416cf763114c4'
@@ -48,7 +49,11 @@ def verify_probe(path):
 
 class Adb:
     def __init__(self):
-        if not config.ADB_PATH.is_file() or not config.ADB_SERIAL:
+        if not config.ADB_PATH.is_file():
+            raise ValueError('Configure adb_path and adb_serial in settings.local.json')
+        if config.AUTO_DISCOVER_ADB:
+            resolve_and_store(str(config.ADB_PATH), config.ADB_SERIAL, vm_index=config.VM_INDEX)
+        if not config.ADB_SERIAL:
             raise ValueError('Configure adb_path and adb_serial in settings.local.json')
 
     def call(self, *args):
@@ -186,3 +191,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
