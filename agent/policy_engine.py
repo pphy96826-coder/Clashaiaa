@@ -1,5 +1,7 @@
 import sys
 import time
+import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -123,6 +125,21 @@ class PolicyEngine:
             base_latency_ticks=1,
             base_latency_ms=0.0,
             validate=False,
+        )
+
+        # ``act`` selects the highest-scoring legal sequence when
+        # ``sample=False``.  Keep the selected sequence likelihood with the
+        # decoded action for the live recheck gate and diagnostics.  It is a
+        # conditional model score, not a calibrated real-world win chance.
+        sequence_log_probability = float(output.log_prob[0].item())
+        sequence_probability = math.exp(max(-60.0, min(0.0, sequence_log_probability)))
+        decoded = type(decoded)(
+            owner=decoded.owner,
+            actions=tuple(replace(action, metadata={
+                **dict(action.metadata),
+                'policy_sequence_log_probability': sequence_log_probability,
+                'policy_sequence_probability': sequence_probability,
+            }) for action in decoded.actions),
         )
 
         adapter.tensorizer.record_action(output.actions, batch, row=0, validate=False)
