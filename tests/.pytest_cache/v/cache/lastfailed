@@ -1,0 +1,9 @@
+{
+  "test_ability_state.py": true,
+  "test_card_selection.py": true,
+  "test_evolution_state.py": true,
+  "test_hero_execution.py": true,
+  "test_profile_comparison.py": true,
+  "test_reconnect_lifecycle.py": true,
+  "test_recovery.py": true
+}

@@ -1,0 +1,10 @@
+# Python 3.12 / macOS arm64. Observed versions; not a cross-platform lock.
+torch==2.14.0
+numpy==2.1.2
+orjson==3.10.16
+pillow==11.0.0
+pyarrow==19.0.0
+safetensors==0.4.5
+sc-compression==0.6.5
+zstandard==0.25.0
+tzdata==2026.3

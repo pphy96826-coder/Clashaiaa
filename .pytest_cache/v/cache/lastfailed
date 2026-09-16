@@ -1,0 +1,12 @@
+{
+  "tests/test_ability_state.py": true,
+  "tests/test_card_selection.py": true,
+  "tests/test_evolution_state.py": true,
+  "tests/test_hero_execution.py": true,
+  "tests/test_profile_comparison.py": true,
+  "tests/test_reconnect_lifecycle.py": true,
+  "tests/test_pipeline.py": true,
+  "tests/test_cannon_timing.py": true,
+  "tests/test_full_simulator.py::FullSimulatorTests::test_prepared_engine_reports_unsupported_26_action_cards": true,
+  "tests/test_recovery.py::RecoveryTests": true
+}

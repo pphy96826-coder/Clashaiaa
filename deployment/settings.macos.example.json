@@ -1,0 +1,16 @@
+{
+  "firstlight_dir": "../FirstLight_CR",
+  "adb_path": "/usr/local/bin/adb",
+  "adb_serial": "REPLACE_WITH_LIVE_SERIAL",
+  "account_id": null,
+  "device": "mps",
+  "probe_port": 26890,
+  "calibration_path": "calibration.json",
+  "calibration_verified": false,
+  "lifecycle_calibration_path": "local/lifecycle.json",
+  "ability_calibration_path": "ability_calibration.local.json",
+  "full_simulation_root": "../clash-royale-battle-engine-main",
+  "full_simulation_serial": "REPLACE_WITH_OFFLINE_SERIAL",
+  "full_simulation_port": 26790,
+  "enable_full_simulation": false
+}
