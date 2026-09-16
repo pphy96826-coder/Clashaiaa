@@ -3,6 +3,7 @@
   "upstream_dir": null,
   "adb_path": "C:/Program Files/Netease/MuMuPlayer/nx_device/12.0/shell/adb.exe",
   "adb_serial": "127.0.0.1:16384",
+  "auto_discover_adb": true,
   "account_id": null,
   "device": "cuda:0",
   "probe_port": 26888,
@@ -10,3 +11,4 @@
   "lifecycle_calibration_path": "lifecycle_ui_calibration.json",
   "calibration_verified": false
 }
+
