@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Callable
 
 import config
+from bridge.adb_runtime import resolve_and_store
 if str(config.FIRSTLIGHT_DIR) not in sys.path:
     sys.path.insert(0, str(config.FIRSTLIGHT_DIR))
 from native_runner.touch_executor import PersistentTouchAgentClient, TouchExecutorError
@@ -77,8 +78,8 @@ class LiveLifecycle:
 
     def _recover_touch_agent(self) -> None:
         """Recreate the explicit ADB lane and resident guest touch agent."""
-        serial = str(config.ADB_SERIAL or '').strip()
         adb = str(config.ADB_PATH or '').strip()
+        serial = resolve_and_store(adb, config.ADB_SERIAL, vm_index=config.VM_INDEX) if config.AUTO_DISCOVER_ADB else str(config.ADB_SERIAL or '').strip()
         if not serial or not adb:
             return
         forward = [adb, '-s', serial, 'forward',
@@ -135,8 +136,8 @@ class LiveLifecycle:
         request.  A valid JSON response from the guest probe is the readiness
         criterion; an open TCP port alone is not sufficient.
         """
-        serial = str(config.ADB_SERIAL or '').strip()
         adb = str(config.ADB_PATH or '').strip()
+        serial = resolve_and_store(adb, config.ADB_SERIAL, vm_index=config.VM_INDEX) if config.AUTO_DISCOVER_ADB else str(config.ADB_SERIAL or '').strip()
         if not serial or not adb:
             raise LifecycleError('ADB serial/path is not configured')
         base = [adb, '-s', serial]
@@ -285,3 +286,4 @@ class LiveLifecycle:
                         continue
                 time.sleep(max(.25, self.poll_interval))
         raise LifecycleError('Lobby not visually confirmed before timeout')
+
