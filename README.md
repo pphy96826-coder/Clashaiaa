@@ -123,6 +123,9 @@ FirstLight 推理代码、冻结目录数据和模型权重需单独准备，版
 [FirstLight CR](https://gitlab.com/firstlight3/FirstLight_CR)。
 本项目基于并致谢 [RoyaleHarness](https://github.com/Isara-Mo/RoyaleHarness)
 的开源工程；当前版本在此基础上提供面向在线测试环境的桥接与运行适配，且没有修改上游权重。
+离线镜像部分参考并致谢
+[Clash-Royale-Battle-Engine](https://github.com/Jason-XII/Clash-Royale-Battle-Engine)
+的引擎与协议设计。
 
 本项目采用 **Apache-2.0**，见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 和
 [上游来源说明](probe/FIRSTLIGHT_NOTICE.md)。
