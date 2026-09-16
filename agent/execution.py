@@ -362,6 +362,13 @@ class ActionExecutor:
                              if self.active.observation_received_at else None),
                          prediction_compensation_ms=self.end_to_end_latency_ms,
                          **result)
+                # The Android shell/touch transport can occasionally take
+                # longer than the nominal ACK window.  The game cannot have
+                # consumed a tap before that transport completes, so start
+                # ACK timing here rather than at thread submission.  This
+                # prevents a slow but still-live touch from being mislabeled
+                # UNKNOWN halfway through its own input transaction.
+                self.active.sent_at = completed_at
             except Exception as exc:
                 self.fault = str(exc)
                 self.pending.clear()
@@ -369,6 +376,11 @@ class ActionExecutor:
             self.future, self.active = None, None
         if state is None:
             # A transient query failure must not launch any queued touch.
+            return
+        if self.future is not None:
+            # Never inspect hand/elixir timeout rules while the serial touch
+            # transaction is still executing.  In particular, do not let the
+            # 350ms ACK window race a 500ms emulator input operation.
             return
         if getattr(state, 'native_finalized', False) is True:
             self.end_battle()
