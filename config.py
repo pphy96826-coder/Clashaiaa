@@ -29,6 +29,7 @@ CALIBRATION_VERIFIED = SETTINGS.get('calibration_verified') is True
 VM_INDEX = SETTINGS.get('vm_index', 0)
 VM_NAME = SETTINGS.get('vm_name', '')
 ADB_SERIAL = SETTINGS.get('adb_serial', '')
+AUTO_DISCOVER_ADB = SETTINGS.get('auto_discover_adb', True) is True
 ADB_PATH = configured_path('adb_path', shutil.which('adb') or 'adb.exe')
 MUMU_MANAGER_PATH = configured_path('mumu_manager_path', 'MuMuManager.exe')
 NDK_ROOT = configured_path('ndk_root', os.environ.get('ANDROID_NDK_HOME', 'android-ndk'))
@@ -151,3 +152,4 @@ def model_grid_to_screen(grid_x, grid_y, subcell_offset=(0.0, 0.0)):
     return ScreenCalibration.load(CALIBRATION_PATH).project(grid_x + .5 + dx, grid_y + .5 + dy)
 
 grid_to_screen = model_grid_to_screen
+
