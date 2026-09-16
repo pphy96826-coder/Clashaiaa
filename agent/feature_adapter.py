@@ -39,6 +39,7 @@ from bridge.projectile_origin import ProjectileOrigins
 from bridge.reference_events import ReferenceEvents
 
 HOG_26_DECK = (26000010, 26000014, 26000021, 26000030, 26000038, 27000000, 28000000, 28000011)
+MINER = 26000032
 
 # Conservative impact envelopes in native world units.  They are deliberately
 # wider than the visual effect so a delayed spell cannot wake an inactive king
@@ -327,6 +328,7 @@ class FeatureAdapter:
             area_origins.pop(eid, None)
             projectile_origins.pop(eid, None)
         projectile_issues = []
+        miner_landing_targets = 0
         for ent in state.entities:
             cid = int(ent.get('card_id', 0))
             if ent.get('owner') not in (0, 1):
@@ -368,6 +370,22 @@ class FeatureAdapter:
             evolution = evolved_entity_state(ent, self.bundle, state.tick)
             movement = movement_state(ent, state.tick)
             deployment = deployment_state(ent, state.tick)
+            miner_target = None
+            if cid == MINER and deployment is not None:
+                # Miner is not represented as a regular projectile by this
+                # client build.  During its native deployment/tunnel phase,
+                # its object coordinates are the only measured landing-side
+                # evidence exposed by the live probe.  Bind that measured
+                # position to the nearest *opponent* tower (including king)
+                # so the model receives a concrete lane relation instead of
+                # having to infer left/right from an underground sprite.
+                candidates = [tower for tower in self._towers.values()
+                              if tower.owner != int(ent['owner']) and tower.hitpoints > 0]
+                if candidates:
+                    x, y = probe_to_world(ent['x'], ent['y'])
+                    miner_target = min(candidates, key=lambda tower:
+                        (tower.position[0] - x) ** 2 + (tower.position[1] - y) ** 2).entity_id
+                    miner_landing_targets += 1
             semantic = runtime_provenance(ENTITY_RUNTIME_SEMANTIC_FIELDS, measured_attack, state.tick)
             for field, value in (('movement_runtime', movement), ('deployment_runtime', deployment)):
                 if value is not None:
@@ -397,7 +415,7 @@ class FeatureAdapter:
                 # letting the policy mistake the target lane while the barrel
                 # is still in flight.
                 visible_target=(measured_attack.target_entity if measured_attack and measured_attack.target_entity is not None
-                                else projectile.target_entity if projectile else None),
+                                else projectile.target_entity if projectile else miner_target),
                 source_entity=(projectile.source_entity if projectile else
                     area_origins[eid]['parent_id'] if eid in area_origins else
                     spawn_groups[eid].parent_entity_id if eid in spawn_groups else None)
@@ -414,6 +432,7 @@ class FeatureAdapter:
                             attack_known_count=sum(e.attack_state is not None for e in result),
                             attack_phase_known_count=sum(e.attack_state is not None and e.attack_state.phase.value != 'unknown' for e in result),
                             projectile_runtime_count=sum(e.projectile_state is not None for e in result),
+                            miner_landing_target_count=miner_landing_targets,
                             projectile_runtime_issues=projectile_issues,
                             attack_target_count=sum(e.attack_state is not None and e.attack_state.target_entity is not None for e in result),
                             movement_runtime_count=sum(e.movement_runtime is not None for e in result),
