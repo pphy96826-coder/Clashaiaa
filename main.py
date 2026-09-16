@@ -606,7 +606,7 @@ class CustomCardDeployAgent:
                                 and not self.executor.pending and self.executor.future is None
                                 and state.tick >= FIRST_POLICY_DECISION_TICK
                                 and state.tick >= last_decision_tick + config.DECISION_TICKS
-                                and not self.executor.decision_blocked()):
+                                and not self.executor.decision_blocked(state)):
                             # Use the same time basis as pending virtual-card
                             # predictions: measured end-to-end input latency
                             # first, then the configured future horizon.
@@ -698,7 +698,7 @@ class CustomCardDeployAgent:
                             and state.tick >= last_decision_tick + config.DECISION_TICKS
                             and not self.executor.pending
                             and self.executor.future is None
-                            and not self.executor.decision_blocked()):
+                            and not self.executor.decision_blocked(state)):
                         pipeline_start = time.perf_counter()
                         batch, obs = self.adapter.tensorize(state, self.executor.blocked_slots(state), self.executor.reserved_elixir,
                             self.executor.blocked_abilities(), self.executor.model_predictions(state),
@@ -758,7 +758,12 @@ class CustomCardDeployAgent:
                                 legal_candidates=int(batch.candidates.mask.sum()))
                         wait_since = (state.tick if wait_since is None else wait_since) if waiting else None
                         last_decision_tick = state.tick
-                        self.executor.submit(decoded, state)
+                        # After any card consume (or an ambiguous touch), use
+                        # a settled frame as a no-write preview.  A follow-up
+                        # card is sent only if it remains the same highest
+                        # scoring action on the next fresh policy turn.
+                        if self.executor.post_action_recheck(decoded, state):
+                            self.executor.submit(decoded, state)
                 except TelemetryError as exc:
                     self.log('telemetry_rejected', tick=state.tick, error=str(exc))
                 # Refresh telemetry promptly while an already-decided action
