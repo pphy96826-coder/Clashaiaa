@@ -143,6 +143,17 @@ ACTION_MAX_LATENESS_SECONDS = 0.8
 # bounded gap for the Android UI commit, but avoid adding an unnecessary
 # 60ms to every action; fresh validation and serial input remain enforced.
 CARD_SELECTION_GAP_SECONDS = 0.04
+# A card acknowledgement only proves that the hand was consumed.  Its troop,
+# spell effect, or projectile is commonly not visible in the same probe frame.
+# Before allowing another card, collect a settled frame and re-score the next
+# action twice.  This suppresses "double defence" without serializing the
+# actual Android touch path behind an arbitrary multi-second timeout.
+POST_ACTION_SETTLE_TICKS = int(SETTINGS.get('post_action_settle_ticks', 4))
+POST_ACTION_RECHECK_MIN_SCORE_RATIO = float(SETTINGS.get('post_action_recheck_min_score_ratio', .70))
+if POST_ACTION_SETTLE_TICKS < 0:
+    raise ValueError('post_action_settle_ticks must be non-negative')
+if not 0.0 < POST_ACTION_RECHECK_MIN_SCORE_RATIO <= 1.0:
+    raise ValueError('post_action_recheck_min_score_ratio must be in (0, 1]')
 
 # Compatibility helper: grid indices are cell centers, including subcell.
 # New execution code takes the whole decoded ActionV1 (and its owner).
@@ -152,4 +163,3 @@ def model_grid_to_screen(grid_x, grid_y, subcell_offset=(0.0, 0.0)):
     return ScreenCalibration.load(CALIBRATION_PATH).project(grid_x + .5 + dx, grid_y + .5 + dy)
 
 grid_to_screen = model_grid_to_screen
-
