@@ -7,6 +7,7 @@ import time
 import uuid
 
 import config
+from bridge.adb_runtime import resolve_and_store
 from bridge.coordinates import ScreenCalibration
 from bridge.hero_execution import ABILITY, ability_button, covered_by_ability_hud
 
@@ -22,6 +23,8 @@ class Actuator:
         self.size = None
 
     def prepare(self):
+        if config.AUTO_DISCOVER_ADB:
+            self.serial = resolve_and_store(self.adb_path, self.serial, vm_index=config.VM_INDEX)
         base = [self.adb_path, '-s', self.serial]
         if re.fullmatch(r'127\.0\.0\.1:\d+', self.serial):
             connected = False
@@ -144,3 +147,4 @@ class Actuator:
                 self._proc.kill()
             self._proc.stdin.close()
             self._proc.stdout.close()
+
