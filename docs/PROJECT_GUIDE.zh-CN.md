@@ -130,6 +130,8 @@ python3.12 -m venv .venv
 
 建立在线实例；需要离线引擎时再建立独立实例。确认 `adb devices -l`、对应实例的 `shell su -c id` 与 `shell wm size`。实例名称、是否勾选 5555 均不能证明序列号。
 
+`auto_discover_adb` 默认开启。启动和链路恢复时程序会先重新注册配置中的 MuMu 地址，再检查 `get-state`；如果该地址失效，会从当前 ADB 设备列表选择唯一在线设备，并动态重建 probe/touch forward。若同时有多个在线实例且原地址都失效，程序会停止并要求设置 `vm_index` 或新的 `adb_serial`，避免把触控发到错误实例。
+
 从 deployment/settings.macos.example.json 创建根目录 settings.local.json，填写实测 adb_path、adb_serial、firstlight_dir。先保持 account_id=null、calibration_verified=false、enable_full_simulation=false。
 
 GUI 与 CLI 均使用同一个绝对配置路径：
