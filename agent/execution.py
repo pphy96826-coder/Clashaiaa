@@ -58,6 +58,8 @@ class ActionExecutor:
         self._confirmed_for_simulation = []
         self._latency_samples_ms = []
         self.end_to_end_latency_ms = float(config.PREDICTION_LATENCY_COMPENSATION_MS)
+        self._post_action_settle_tick = -1
+        self._post_action_preview = None
 
     def _in_flight_count(self):
         return len(self.pending) + len(self.spawn_watch)
@@ -78,6 +80,8 @@ class ActionExecutor:
         self._decision_blocked_until = 0.0
         self._recent_misses.clear()
         self._confirmed_for_simulation.clear()
+        self._post_action_settle_tick = -1
+        self._post_action_preview = None
 
     def consume_fresh_state_required(self):
         """Return whether the caller must fetch a new probe frame first."""
@@ -91,8 +95,73 @@ class ActionExecutor:
         self._confirmed_for_simulation.clear()
         return actions
 
-    def decision_blocked(self):
-        return time.perf_counter() < self._decision_blocked_until
+    def decision_blocked(self, state=None):
+        """Whether a new policy turn must wait for an authoritative frame."""
+        if time.perf_counter() < self._decision_blocked_until:
+            return True
+        return state is not None and self._post_action_settle_tick >= 0 and state.tick < self._post_action_settle_tick
+
+    @staticmethod
+    def _candidate_key(decoded):
+        action = next((item for item in decoded.actions if item.kind.value != 'wait'), None)
+        if action is None:
+            return None
+        return (action.kind.value, int(action.card_id or 0),
+                int(action.hand_slot if action.hand_slot is not None else -1),
+                int(action.source_entity if action.source_entity is not None else -1),
+                tuple(action.target_grid) if action.target_grid is not None else None)
+
+    @staticmethod
+    def _candidate_score(decoded):
+        action = next((item for item in decoded.actions if item.kind.value != 'wait'), None)
+        if action is None:
+            return 0.0
+        value = action.metadata.get('policy_sequence_probability', 0.0)
+        return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else 0.0
+
+    def _arm_post_action_recheck(self, state, pending, *, reason):
+        """Require a settled no-write preview before the next card input."""
+        settle_tick = int(state.tick) + config.POST_ACTION_SETTLE_TICKS
+        self._post_action_settle_tick = max(self._post_action_settle_tick, settle_tick)
+        self._post_action_preview = None
+        self.log('post_action_settle_armed', command_seq=pending.command_seq,
+                 card=pending.action.card_id, reason=reason,
+                 observed_tick=state.tick, settle_tick=self._post_action_settle_tick,
+                 settle_ticks=config.POST_ACTION_SETTLE_TICKS)
+
+    def post_action_recheck(self, decoded, state):
+        """Return true only when a post-card candidate remains stable.
+
+        The first settled inference is deliberately preview-only.  The next
+        policy frame may submit only the same first action and only if its
+        selected-sequence score has retained enough of that preview score.
+        """
+        if self._post_action_settle_tick < 0:
+            return True
+        if state.tick < self._post_action_settle_tick:
+            return False
+        key = self._candidate_key(decoded)
+        score = self._candidate_score(decoded)
+        if self._post_action_preview is None:
+            self._post_action_preview = {'key': key, 'score': score, 'tick': int(state.tick)}
+            self.log('post_action_preview', tick=state.tick, candidate=key,
+                     sequence_probability=score, write_suppressed=True)
+            # A WAIT preview has already answered the question: no second
+            # response is currently warranted.  Return to normal cadence.
+            if key is None:
+                self._post_action_settle_tick = -1
+                self._post_action_preview = None
+            return False
+        preview = self._post_action_preview
+        self._post_action_settle_tick = -1
+        self._post_action_preview = None
+        minimum = preview['score'] * config.POST_ACTION_RECHECK_MIN_SCORE_RATIO
+        accepted = key is not None and key == preview['key'] and score >= minimum
+        self.log('post_action_recheck', tick=state.tick, preview_candidate=preview['key'],
+                 candidate=key, preview_probability=preview['score'],
+                 sequence_probability=score, minimum_probability=minimum,
+                 accepted=accepted)
+        return accepted
 
     @staticmethod
     def _action_key(action):
@@ -368,6 +437,7 @@ class ActionExecutor:
                     self._confirmed_for_simulation.append((action, pending.sent_tick,
                                                            pending.command_seq))
                     self._fresh_state_required = True
+                    self._arm_post_action_recheck(state, pending, reason='hand_ack')
                 elif now - pending.sent_at > config.ACK_TIMEOUT_SECONDS:
                     self.pending.remove(pending)
                     # A missing ACK is ambiguous: the touch may have reached
@@ -397,6 +467,7 @@ class ActionExecutor:
                     # Slot, resource, and identical-action guards still apply.
                     self._recent_misses[self._action_key(action)] = now + 1.0
                     self._fresh_state_required = True
+                    self._arm_post_action_recheck(state, pending, reason='ack_timeout')
             elif now > pending.expires:
                 self.pending.remove(pending)
                 self.log('action_expired', card=action.card_id, decision_tick=pending.decision_tick,
