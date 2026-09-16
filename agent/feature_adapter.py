@@ -390,8 +390,14 @@ class FeatureAdapter:
                 max_hitpoints=float(max_hp) if max_hp and max_hp > 0 else None,
                 shield=float(ent['shield']) if 'shield' in ent else None,
                 attack_state=measured_attack,
+                # A validated projectile target is direct native runtime
+                # evidence, not a guessed origin chain.  Keep it in the
+                # reference profile as well: aerial delivery cards such as a
+                # Goblin Barrel otherwise expose only their current position,
+                # letting the policy mistake the target lane while the barrel
+                # is still in flight.
                 visible_target=(measured_attack.target_entity if measured_attack and measured_attack.target_entity is not None
-                                else projectile.target_entity if projectile and self.observation_profile == 'extended' else None),
+                                else projectile.target_entity if projectile else None),
                 source_entity=(projectile.source_entity if projectile else
                     area_origins[eid]['parent_id'] if eid in area_origins else
                     spawn_groups[eid].parent_entity_id if eid in spawn_groups else None)
