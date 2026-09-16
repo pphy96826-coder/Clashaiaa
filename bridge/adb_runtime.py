@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from typing import Iterable
 
 
@@ -83,9 +84,20 @@ def discover_serial(adb: str, preferred: str = "", *, vm_index=None,
     raise RuntimeError("multiple ready ADB devices; set vm_index or adb_serial to select the online MuMu instance")
 
 
-def resolve_and_store(adb: str, preferred: str = "", *, vm_index=None) -> str:
+def resolve_and_store(adb: str, preferred: str = "", *, vm_index=None,
+                      retries: int = 8) -> str:
     """Resolve a serial and update config's runtime value when available."""
-    serial = discover_serial(adb, preferred, vm_index=vm_index)
+    last_error = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            serial = discover_serial(adb, preferred, vm_index=vm_index)
+            break
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt + 1 < retries:
+                time.sleep(min(0.75, 0.15 * (attempt + 1)))
+    else:
+        raise last_error
     try:
         import config
         config.ADB_SERIAL = serial
