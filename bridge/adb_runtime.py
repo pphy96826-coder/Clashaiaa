@@ -85,17 +85,17 @@ def discover_serial(adb: str, preferred: str = "", *, vm_index=None,
 
 
 def resolve_and_store(adb: str, preferred: str = "", *, vm_index=None,
-                      retries: int = 8) -> str:
+                      retries: int = 20) -> str:
     """Resolve a serial and update config's runtime value when available."""
     last_error = None
     for attempt in range(max(1, int(retries))):
         try:
-            serial = discover_serial(adb, preferred, vm_index=vm_index)
+            serial = discover_serial(adb, preferred, vm_index=vm_index, timeout=1.5)
             break
         except RuntimeError as exc:
             last_error = exc
             if attempt + 1 < retries:
-                time.sleep(min(0.75, 0.15 * (attempt + 1)))
+                time.sleep(0.5)
     else:
         raise last_error
     try:
