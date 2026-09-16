@@ -2,6 +2,7 @@
   "firstlight_dir": "../FirstLight_CR",
   "adb_path": "/usr/local/bin/adb",
   "adb_serial": "REPLACE_WITH_LIVE_SERIAL",
+  "auto_discover_adb": true,
   "account_id": null,
   "device": "mps",
   "probe_port": 26890,
@@ -14,3 +15,4 @@
   "full_simulation_port": 26790,
   "enable_full_simulation": false
 }
+
