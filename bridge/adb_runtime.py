@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
-from typing import Iterable
+import re
 
 
 def parse_devices(output: str) -> list[str]:
@@ -33,6 +33,28 @@ def _is_ready(adb: str, serial: str, timeout: float = 3.0) -> bool:
         return result.returncode == 0 and result.stdout.strip() == "device"
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def _mumu_listener_ports() -> list[int]:
+    """Discover MuMu's current host-side ADB listener after a restart."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], capture_output=True,
+            text=True, timeout=2.0, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    ports = []
+    mumu_line = False
+    for line in result.stdout.splitlines():
+        if line and not line[0].isspace():
+            mumu_line = "MuMu" in line or "mumu" in line.lower()
+        if mumu_line:
+            match = re.search(r":(\d+) \(LISTEN\)$", line)
+            if match:
+                port = int(match.group(1))
+                if 1024 <= port <= 65535 and port not in ports:
+                    ports.append(port)
+    return ports
 
 
 def discover_serial(adb: str, preferred: str = "", *, vm_index=None,
@@ -59,6 +81,15 @@ def discover_serial(adb: str, preferred: str = "", *, vm_index=None,
             pass
     if preferred and _is_ready(adb, preferred, timeout):
         return preferred
+    # MuMu can change 266xx/163xx after a guest restart. Its own host
+    # process exposes the new listener even while adb devices is empty.
+    for port in _mumu_listener_ports():
+        candidate = f"127.0.0.1:{port}"
+        try:
+            subprocess.run([adb, "connect", candidate], capture_output=True,
+                           text=True, timeout=timeout, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
     try:
         result = subprocess.run([adb, "devices", "-l"], capture_output=True,
                                 text=True, timeout=timeout, check=False)
@@ -67,6 +98,25 @@ def discover_serial(adb: str, preferred: str = "", *, vm_index=None,
     devices = parse_devices(result.stdout)
     if not devices:
         raise RuntimeError("no ready ADB device; wait for MuMu Android to finish restarting")
+    # Do not ever auto-select the separately configured offline engine. MuMu
+    # may expose the same guest through both 5555 and a per-instance port;
+    # prefer the port nearest the last configured MuMu endpoint.
+    try:
+        import config
+        offline = str(config.SETTINGS.get("full_simulation_serial") or "").strip()
+        if offline:
+            devices = [serial for serial in devices if serial != offline]
+    except ImportError:
+        pass
+    if len(devices) > 1 and preferred.startswith("127.0.0.1:"):
+        try:
+            old_port = int(preferred.rsplit(":", 1)[1])
+            local = [serial for serial in devices if serial.startswith("127.0.0.1:")]
+            ranked = sorted(local, key=lambda serial: abs(int(serial.rsplit(":", 1)[1]) - old_port))
+            if ranked and abs(int(ranked[0].rsplit(":", 1)[1]) - old_port) < 4096:
+                devices = [ranked[0]]
+        except (TypeError, ValueError):
+            pass
     if len(devices) == 1:
         return devices[0]
     if vm_index is not None:
