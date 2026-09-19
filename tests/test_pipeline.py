@@ -434,6 +434,115 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(acks[0]['evidence'], 'new_source_entity')
         self.assertEqual(acks[0]['spawn_entity_id'], new_id)
 
+    def test_near_target_new_own_entity_confirms_when_source_card_id_differs(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0], grid=(8, 20))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = time.perf_counter() - 0.15
+        pending.input_completed_at = time.perf_counter() - 0.10
+        pending.prior_elixir = s.elixir
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        self.executor.ack_watch.append(pending)
+
+        new_id = 9020
+        target_x, target_y = action_world(first)
+        s.entities.append({
+            'id': new_id,
+            'owner': s.local_owner,
+            'card_id': 99999999,
+            'x': target_x + 700,
+            'y': target_y - 400,
+            'hp': 100,
+            'max_hp': 100,
+        })
+        s.tick += 1
+        s.received_at = pending.input_completed_at + 0.01
+
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(len(acks), 1)
+        self.assertEqual(acks[0]['evidence'], 'new_own_entity_near_target')
+        self.assertEqual(acks[0]['spawn_entity_id'], new_id)
+
+    def test_near_target_entity_fallback_disabled_with_multiple_ack_watches(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0], grid=(8, 20))
+        second = play(slot=1, card=s.hand_cards[1], grid=(8, 20))
+        now = time.perf_counter()
+        pendings = []
+        for seq, action in ((1, first), (2, second)):
+            pending = type('P', (), {})()
+            pending.action = action
+            pending.command_seq = seq
+            pending.state = 'sent'
+            pending.sent_at = now - 0.15
+            pending.input_completed_at = now - 0.10
+            pending.sent_tick = s.tick
+            pending.prior_elixir = s.elixir
+            pending.cost = 1.0
+            pending.decision_at = now - 0.2
+            pending.threat_ids = frozenset()
+            pending.threat_target = None
+            pending.prior_evolution_progress = None
+            pending.prior_entities = frozenset(e['id'] for e in s.entities)
+            pendings.append(pending)
+        self.executor.ack_watch.extend(pendings)
+
+        new_id = 9021
+        target_x, target_y = action_world(first)
+        s.entities.append({
+            'id': new_id,
+            'owner': s.local_owner,
+            'card_id': 99999999,
+            'x': target_x + 200,
+            'y': target_y + 100,
+            'hp': 100,
+            'max_hp': 100,
+        })
+        s.tick += 1
+        s.received_at = now + 0.01
+
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(len(self.executor.ack_watch), 2)
+        self.assertNotIn('hand_ack', [event for event, _ in self.events])
+
+    def test_spell_never_uses_near_target_entity_fallback(self):
+        s = state()
+        first = play(slot=0, card=28000000, grid=(8, 20))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = time.perf_counter() - 0.15
+        pending.input_completed_at = time.perf_counter() - 0.10
+        pending.prior_elixir = s.elixir
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        self.executor.ack_watch.append(pending)
+
+        target_x, target_y = action_world(first)
+        s.entities.append({
+            'id': 9022,
+            'owner': s.local_owner,
+            'card_id': 99999999,
+            'x': target_x,
+            'y': target_y,
+            'hp': 100,
+            'max_hp': 100,
+        })
+        s.tick += 1
+        s.received_at = pending.input_completed_at + 0.01
+
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(self.executor.ack_watch, [pending])
+        self.assertNotIn('hand_ack', [event for event, _ in self.events])
+
     def test_ack_watch_requires_post_input_probe_frame(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
