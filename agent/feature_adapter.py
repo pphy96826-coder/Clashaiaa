@@ -54,6 +54,11 @@ LOW_ELIXIR_ATTACK_MAX_UPPER = 4.0
 LOW_ELIXIR_ATTACK_MAX_WIDTH = 1.0
 COUNTERPUSH_MIN_PROGRESS = 9000.0
 COUNTERPUSH_MAX_PROGRESS = 17000.0
+INCOMING_PUSH_MIN_COST = 5.0
+INCOMING_PUSH_BACKFIELD_DEPTH = 22000.0
+INCOMING_PUSH_DEFENDER_RELEASE_DEPTH = 18000.0
+INCOMING_PUSH_PUNISH_MIN_ELIXIR = 7.0
+INCOMING_PUSH_CORE_DEFENDERS = frozenset((MUSKETEER, CANNON))
 
 # Conservative impact envelopes in native world units.  They are deliberately
 # wider than the visual effect so a delayed spell cannot wake an inactive king
@@ -135,6 +140,7 @@ class FeatureAdapter:
         self._recent_enemy_building_expiry = None
         self._opponent_exact_play_count = 0
         self._opponent_last_play_count = {}
+        self._incoming_push_cores = {}
 
     def _effect_provenance(self, semantic, entity_id):
         if not self._effects_by_entity.get(entity_id, ((), False))[1]:
@@ -627,6 +633,80 @@ class FeatureAdapter:
             return None
         return best
 
+    def _incoming_push_context(self):
+        """Track a public heavy backfield deployment before it becomes pressure.
+
+        A five-plus-elixir enemy troop first seen deep on the opponent's side
+        is enough to declare an incoming push.  The core remains tracked while
+        that exact public entity is alive, so the preparation state does not
+        flicker off merely because it walked out of the original backfield
+        band.  This is tactical board-state tracking only; it does not infer
+        hidden hand contents from entity births.
+        """
+        live_ids = set(self._live_entities)
+        self._incoming_push_cores = {
+            eid: row for eid, row in self._incoming_push_cores.items()
+            if eid in live_ids
+        }
+
+        for eid, ent in self._live_entities.items():
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+            cid = int(ent.get('card_id', -1))
+            spec = self.bundle.card_specs.get(cid)
+            if spec is None or spec.kind.value != 'troop':
+                continue
+            cost = float(spec.elixir_cost)
+            if cost < INCOMING_PUSH_MIN_COST:
+                continue
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+            depth = self._defensive_depth(ent['y'])
+            if (int(eid) not in self._incoming_push_cores
+                    and depth >= INCOMING_PUSH_BACKFIELD_DEPTH):
+                x = float(ent['x'])
+                self._incoming_push_cores[int(eid)] = {
+                    'card_id': cid,
+                    'cost': cost,
+                    'first_seen_tick': int(self._first_seen.get(int(eid), self._observed_tick)),
+                    'initial_lane': 'left' if x < 9000.0 else 'right',
+                }
+
+        active = []
+        for eid, tracked in self._incoming_push_cores.items():
+            ent = self._live_entities.get(eid)
+            if ent is None:
+                continue
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+            x = float(ent['x'])
+            depth = self._defensive_depth(ent['y'])
+            active.append({
+                **tracked,
+                'entity_id': int(eid),
+                'lane': 'left' if x < 9000.0 else 'right',
+                'depth': float(depth),
+            })
+
+        if not active:
+            return None
+        lanes = {row['lane'] for row in active}
+        nearest = min(active, key=lambda row: (row['depth'], -row['cost']))
+        lane = next(iter(lanes)) if len(lanes) == 1 else None
+        return {
+            'lane': lane,
+            'core_entity_id': nearest['entity_id'],
+            'core_card_id': nearest['card_id'],
+            'core_cost': nearest['cost'],
+            'core_depth': nearest['depth'],
+            'core_count': len(active),
+            'reserve_core_defenders': (
+                nearest['depth'] > INCOMING_PUSH_DEFENDER_RELEASE_DEPTH
+            ),
+        }
+
     def _attack_hold_context(self, effective_elixir, pressure=None):
         """Conservatively hold Hog when a live enemy is already near our tower.
 
@@ -720,8 +800,9 @@ class FeatureAdapter:
 
     @staticmethod
     def _attack_opportunity_context(effective_elixir, *, defensive_pressure=False,
-                                    near_tower_pressure=None, counterpush=None,
-                                    building_window=None, low_elixir_window=None):
+                                    near_tower_pressure=None, incoming_push=None,
+                                    counterpush=None, building_window=None,
+                                    low_elixir_window=None):
         """Collapse offensive timing signals into one ordered public context.
 
         The context is advisory and deliberately conservative: defense always
@@ -732,6 +813,23 @@ class FeatureAdapter:
         """
         if defensive_pressure or near_tower_pressure is not None:
             return None
+        if (incoming_push is not None
+                and float(effective_elixir) >= INCOMING_PUSH_PUNISH_MIN_ELIXIR):
+            incoming_lane = incoming_push.get('lane')
+            punish_lane = (
+                'right' if incoming_lane == 'left' else
+                'left' if incoming_lane == 'right' else
+                None
+            )
+            return {
+                'kind': 'heavy_commit',
+                'reason': 'opponent_backfield_heavy_commit',
+                'release_hog': True,
+                'lane': punish_lane,
+                'incoming_push_lane': incoming_lane,
+                'card_id': incoming_push.get('core_card_id'),
+                'cost': incoming_push.get('core_cost'),
+            }
         if counterpush is not None:
             return {
                 'kind': 'counterpush',
@@ -1223,29 +1321,38 @@ class FeatureAdapter:
             opponent_elixir_bounds[1] if opponent_elixir_bounds else None)
         near_tower_pressure = self._near_tower_pressure()
         defensive_pressure = self._has_defensive_pressure()
+        incoming_push = self._incoming_push_context()
+        preparing_for_push = (
+            incoming_push is not None
+            and not defensive_pressure
+            and near_tower_pressure is None
+        )
         attack_hold = self._attack_hold_context(elixir, near_tower_pressure)
         counterpush = self._counterpush_context(
-            True if defensive_pressure else near_tower_pressure)
+            True if defensive_pressure or incoming_push is not None
+            else near_tower_pressure)
         exact_building_cycle_window = self._exact_building_cycle_window(
-            defensive_pressure=defensive_pressure)
+            defensive_pressure=defensive_pressure or preparing_for_push)
         building_attack_window = (
             exact_building_cycle_window
             or self._recent_building_attack_window(
-                state.tick, defensive_pressure=defensive_pressure)
+                state.tick, defensive_pressure=defensive_pressure or preparing_for_push)
         )
         low_elixir_attack_window = self._low_elixir_attack_window(
             elixir, opponent_elixir_bounds,
-            defensive_pressure=defensive_pressure)
+            defensive_pressure=defensive_pressure or preparing_for_push)
         attack_opportunity = self._attack_opportunity_context(
             elixir,
             defensive_pressure=defensive_pressure,
             near_tower_pressure=near_tower_pressure,
+            incoming_push=incoming_push,
             counterpush=counterpush,
             building_window=building_attack_window,
             low_elixir_window=low_elixir_attack_window,
         )
         strategy_phase = (
             'defend' if defensive_pressure or near_tower_pressure is not None else
+            'prepare_defense' if incoming_push is not None else
             'counterpush' if (
                 attack_opportunity is not None
                 and attack_opportunity.get('kind') == 'counterpush'
@@ -1281,6 +1388,19 @@ class FeatureAdapter:
             counterpush['lane'] if counterpush else None)
         self.quality['counterpush_support_entity_id'] = (
             counterpush['support_entity_id'] if counterpush else None)
+        self.quality['incoming_push_active'] = incoming_push is not None
+        self.quality['incoming_push_lane'] = (
+            incoming_push.get('lane') if incoming_push else None)
+        self.quality['incoming_push_card_id'] = (
+            incoming_push.get('core_card_id') if incoming_push else None)
+        self.quality['incoming_push_cost'] = (
+            incoming_push.get('core_cost') if incoming_push else None)
+        self.quality['incoming_push_depth'] = (
+            incoming_push.get('core_depth') if incoming_push else None)
+        self.quality['incoming_push_core_count'] = (
+            incoming_push.get('core_count') if incoming_push else 0)
+        self.quality['incoming_push_reserve_defenders'] = bool(
+            incoming_push and incoming_push.get('reserve_core_defenders'))
         self.quality['neutral_patience_active'] = neutral_patience
         self.quality['attack_opportunity_active'] = attack_opportunity is not None
         self.quality['attack_opportunity_kind'] = (
@@ -1331,6 +1451,16 @@ class FeatureAdapter:
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
+            if (incoming_push is not None
+                    and cid == HOG_RIDER
+                    and float(elixir) < INCOMING_PUSH_PUNISH_MIN_ELIXIR):
+                slot_reasons[str(slot)] = 'strategy_hold_incoming_push'
+                continue
+            if (incoming_push is not None
+                    and incoming_push.get('reserve_core_defenders')
+                    and cid in INCOMING_PUSH_CORE_DEFENDERS):
+                slot_reasons[str(slot)] = 'strategy_reserve_incoming_push'
+                continue
             if neutral_patience and cid in NEUTRAL_PATIENCE_CARDS:
                 if not (cid == HOG_RIDER and hog_opportunity_release):
                     slot_reasons[str(slot)] = 'strategy_neutral_patience'
@@ -1341,6 +1471,11 @@ class FeatureAdapter:
             if defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
                 entry = self._mask_to_defensive_lane(
                     entry, defensive_lane_gate['threat_lane'])
+            elif (incoming_push is not None
+                    and incoming_push.get('lane') is not None
+                    and cid in INCOMING_PUSH_CORE_DEFENDERS):
+                entry = self._mask_to_lane(
+                    entry, incoming_push['lane'], 'incoming_push_lane')
             if cid == HOG_RIDER and hog_opportunity_lane is not None:
                 entry = self._mask_to_lane(
                     entry, hog_opportunity_lane, 'attack_opportunity_lane')
@@ -1384,6 +1519,19 @@ class FeatureAdapter:
                          counterpush['support_entity_id'] if counterpush else None),
                      'counterpush_support_card_id': (
                          counterpush['support_card_id'] if counterpush else None),
+                     'incoming_push_active': incoming_push is not None,
+                     'incoming_push_lane': (
+                         incoming_push.get('lane') if incoming_push else None),
+                     'incoming_push_card_id': (
+                         incoming_push.get('core_card_id') if incoming_push else None),
+                     'incoming_push_cost': (
+                         incoming_push.get('core_cost') if incoming_push else None),
+                     'incoming_push_depth': (
+                         incoming_push.get('core_depth') if incoming_push else None),
+                     'incoming_push_core_count': (
+                         incoming_push.get('core_count') if incoming_push else 0),
+                     'incoming_push_reserve_defenders': bool(
+                         incoming_push and incoming_push.get('reserve_core_defenders')),
                      'neutral_patience_active': neutral_patience,
                      'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR,
                      'attack_opportunity_active': attack_opportunity is not None,
