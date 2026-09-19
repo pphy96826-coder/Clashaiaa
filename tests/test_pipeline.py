@@ -1361,6 +1361,61 @@ class AdapterTests(unittest.TestCase):
             'strategy_prelock_defense',
         )
 
+    def test_long_range_building_can_trigger_prelock(self):
+        a, s = self.adapter()
+
+        # Pick a supported attacking building with the longest static range.
+        # This keeps the regression semantic instead of hard-coding one card
+        # identity; Mortar/X-Bow style buildings are the intended live case.
+        candidates = [
+            (float(spec.range_tiles), int(card_id))
+            for card_id, spec in a.bundle.card_specs.items()
+            if spec.kind.value == 'building'
+            and isinstance(spec.range_tiles, (int, float))
+            and float(spec.range_tiles) > 0
+        ]
+
+        self.assertTrue(
+            candidates,
+            'semantic bundle must expose at least one ranged building',
+        )
+
+        attack_range, card_id = max(candidates)
+
+        # Put the building directly in front of our left princess tower at a
+        # distance inside its proved static attack envelope.
+        tower_y = 6500.0
+        enemy_y = min(
+            15500.0,
+            tower_y + attack_range * 1000.0 + 500.0,
+        )
+
+        add_enemy(
+            s,
+            9310,
+            3500,
+            enemy_y,
+            card_id=card_id,
+            hp=1500,
+        )
+        s.tick += 1
+
+        ctx = a.prelock_context(s, 100.0)
+
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx['enemy_id'], 9310)
+        self.assertEqual(ctx['enemy_card_id'], card_id)
+        self.assertEqual(ctx['lane'], 'left')
+        self.assertEqual(ctx['state'], 'critical')
+        self.assertEqual(
+            ctx['reason'],
+            'tower_in_attack_range',
+        )
+        self.assertEqual(
+            ctx['closing_speed_per_tick'],
+            0.0,
+        )
+
     def test_fast_melee_prelock_triggers_from_closing_eta(self):
         a, s = self.adapter()
 

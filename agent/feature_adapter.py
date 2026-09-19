@@ -795,8 +795,15 @@ class FeatureAdapter:
 
             spec = self.bundle.card_specs.get(int(card_id))
 
-            # Effects/spells/buildings are not walking tower-lock threats.
-            if spec is not None and spec.kind.value != 'troop':
+            # Both troops and offensive buildings can create an immediate
+            # princess-tower lock.  Mortar/X-Bow style buildings are
+            # stationary, so their urgency comes from static attack range or
+            # validated native target acquisition rather than closing speed.
+            # Spells/effects still never enter this detector.
+            if (
+                spec is not None
+                and spec.kind.value not in ('troop', 'building')
+            ):
                 continue
 
             ex, ey = probe_to_world(ent['x'], ent['y'])
