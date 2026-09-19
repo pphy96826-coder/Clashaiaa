@@ -455,7 +455,7 @@ class ActionExecutor:
     def _cycle_confirms_play(self, pending, state):
         current = self._native_cycle(state, pending.action.owner)
         expected = self._expected_cycle_after_play(
-            pending.prior_cycle, pending.action.card_id)
+            getattr(pending, 'prior_cycle', None), pending.action.card_id)
         return expected is not None and current == expected
 
     def _infer_slot_card_from_cycle(self, state, slot):
@@ -548,8 +548,8 @@ class ActionExecutor:
         self.slot_consume_guards[int(slot)] = {
             'card_id': int(pending.action.card_id or 0),
             'raw_baseline_card': int(
-                pending.prior_raw_hand_card
-                if pending.prior_raw_hand_card is not None
+                getattr(pending, 'prior_raw_hand_card', None)
+                if getattr(pending, 'prior_raw_hand_card', None) is not None
                 else (pending.action.card_id or 0)
             ),
             'command_seq': int(pending.command_seq),
@@ -977,9 +977,11 @@ class ActionExecutor:
                     pending.ack_timeout_seconds = ack_timeout_seconds
                 raw_hand_card = self._authoritative_hand_card(
                     state, action.hand_slot, action.owner)
+                prior_raw_hand_card = getattr(
+                    pending, 'prior_raw_hand_card', None)
                 hand_baseline = (
-                    int(pending.prior_raw_hand_card)
-                    if pending.prior_raw_hand_card is not None
+                    int(prior_raw_hand_card)
+                    if prior_raw_hand_card is not None
                     else int(action.card_id)
                 )
                 hand_changed = (
@@ -1115,13 +1117,16 @@ class ActionExecutor:
                         # the pre-play next-card position instead of reopening
                         # the stale source card.
                         self._clear_spend(pending.command_seq)
+                        prior_cycle = getattr(pending, 'prior_cycle', None)
+                        prior_raw_hand_card = getattr(
+                            pending, 'prior_raw_hand_card', None)
                         replacement = (
-                            int(pending.prior_cycle[0])
-                            if pending.prior_cycle else None
+                            int(prior_cycle[0])
+                            if prior_cycle else None
                         )
                         stale_raw = (
-                            int(pending.prior_raw_hand_card)
-                            if pending.prior_raw_hand_card is not None
+                            int(prior_raw_hand_card)
+                            if prior_raw_hand_card is not None
                             else int(action.card_id)
                         )
                         if replacement == stale_raw:
