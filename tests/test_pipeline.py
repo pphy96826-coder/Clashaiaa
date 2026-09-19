@@ -381,6 +381,60 @@ class AdapterTests(unittest.TestCase):
             'strategy_neutral_patience',
         )
 
+    def test_neutral_patience_holds_cannon_but_keeps_cheap_cycle(self):
+        raw = opening()
+        hand = (27000000, 26000010, 26000030, 26000038)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        raw['players'][0]['elixir'] = 7.0
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'neutral-patience-cannon')
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertTrue(o.action_mask.reasons['neutral_patience_active'])
+        self.assertFalse(o.action_mask.hand_slots[0])  # Cannon held.
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'strategy_neutral_patience',
+        )
+        self.assertTrue(o.action_mask.hand_slots[1])  # Skeletons available.
+        self.assertTrue(o.action_mask.hand_slots[2])  # Ice Spirit available.
+        self.assertTrue(o.action_mask.hand_slots[3])  # Ice Golem available.
+        self.assertTrue(o.action_mask.kinds['wait'])
+
+    def test_defensive_pressure_releases_cannon_from_neutral_patience(self):
+        raw = opening()
+        hand = (27000000, 26000010, 26000030, 26000038)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        raw['players'][0]['elixir'] = 7.0
+        s = ProbeClient(account_id=123).parse(raw)
+        add_enemy(s, 9391, 3500, 11000, card_id=26000021)
+        s.tick += 1
+        a = FeatureAdapter()
+        a.reset_match(s, 'defend-releases-cannon')
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'playable',
+        )
+
     def test_neutral_patience_releases_near_elixir_cap(self):
         a, s = self.adapter()
         s.elixir = 8.5
