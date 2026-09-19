@@ -270,6 +270,32 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(len(self.executor.pending),1)
         self.assertIn('in_flight_capacity', [d.get('reason') for e,d in self.events])
 
+    def test_input_completion_moves_to_ack_watch_and_provisional_reservation(self):
+        s = state()
+        add_enemy(s, 9001, 3500, 11500)
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 11))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = time.perf_counter()
+        pending.prior_elixir = s.elixir
+        self.executor.active = pending
+        future = Mock()
+        future.done.return_value = True
+        future.result.return_value = {'input_ms': 2, 'screen': [1, 1]}
+        self.executor.future = future
+
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.pending)
+        self.assertEqual(self.executor.ack_watch, [pending])
+        self.assertEqual(len(self.executor.threat_reservations), 1)
+        self.assertEqual(self.executor.threat_reservations[0].confidence, 'provisional')
+        self.assertTrue(self.executor.consume_fresh_state_required())
+        events = [event for event, _ in self.events]
+        self.assertIn('ack_watch_started', events)
+
     def test_completed_input_ack_watch_allows_different_slot(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
