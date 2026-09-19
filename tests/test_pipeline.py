@@ -829,6 +829,16 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(self.executor.ack_watch, [pending])
         self.assertEqual(len(self.executor.threat_reservations), 1)
         self.assertEqual(self.executor.threat_reservations[0].confidence, 'provisional')
+        provisional = [
+            data for event, data in self.events
+            if event == 'threat_reservation_started'
+            and data.get('confidence') == 'provisional'
+        ]
+        self.assertGreaterEqual(
+            provisional[-1]['ttl_ms'],
+            round((pending.ack_timeout_seconds
+                   + self.executor.THREAT_PROVISIONAL_ACK_GRACE_SECONDS) * 1000),
+        )
         self.assertTrue(self.executor.consume_fresh_state_required())
         events = [event for event, _ in self.events]
         self.assertIn('ack_watch_started', events)
@@ -1959,6 +1969,75 @@ class ExecutorTests(unittest.TestCase):
                   if event == 'threat_reservation_started'
                   and data.get('confidence') == 'confirmed']
         self.assertEqual(starts[-1]['ttl_ms'], 850)
+
+    def _reserve_spell_swarm(self, s):
+        # Model a Goblin-Barrel-style tight multi-body threat. The raw child
+        # card identity is intentionally the same for all three bodies.
+        s.hand_cards[0] = 28000011
+        for entity_id, x, y in (
+            (9101, 3000, 11500),
+            (9102, 4000, 11500),
+            (9103, 3500, 12500),
+        ):
+            add_enemy(s, entity_id, x, y, card_id=26000003, hp=200)
+        log = play(slot=0, card=28000011, grid=(3, 11))
+        self.executor.submit(SimpleNamespace(actions=(log,)), s)
+        pending = self.executor.pending.pop(0)
+        pending.ack_timeout_seconds = config.CARD_ACK_TIMEOUT_MAX_SECONDS
+        now = time.perf_counter()
+        self.assertEqual(
+            pending.threat_ids,
+            frozenset((9101, 9102, 9103)),
+        )
+        self.assertTrue(self.executor._commit_threat_reservation(
+            pending, s, now, confidence='confirmed'))
+        return pending
+
+    def test_spell_reservation_groups_tight_same_card_swarm(self):
+        s = state()
+        pending = self._reserve_spell_swarm(s)
+
+        # One sibling disappearing must not change the cohort identity enough
+        # to reopen defence on the remaining bodies.
+        s.entities[:] = [e for e in s.entities if e.get('id') != 9101]
+        second = play(slot=1, card=s.hand_cards[1], grid=(4, 11))
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertFalse(self.executor.pending)
+        suppressed = [
+            data for event, data in self.events
+            if event == 'action_suppressed'
+            and data.get('reason') == 'threat_already_committed'
+        ]
+        self.assertTrue(suppressed)
+        self.assertTrue(
+            set(suppressed[-1]['threat_ids'])
+            & set(pending.threat_ids)
+        )
+        confirmed = [
+            data for event, data in self.events
+            if event == 'threat_reservation_started'
+            and data.get('confidence') == 'confirmed'
+        ]
+        self.assertGreaterEqual(
+            confirmed[-1]['ttl_ms'],
+            round(self.executor.SPELL_THREAT_RESERVATION_CONFIRMED_SECONDS * 1000),
+        )
+
+    def test_swarm_reservation_does_not_absorb_different_push_unit(self):
+        s = state()
+        self._reserve_spell_swarm(s)
+        # A different card/entity nearby is still a separate threat and can
+        # receive its own defender immediately.
+        add_enemy(s, 9199, 7500, 11500, card_id=26000021, hp=1200)
+        second = play(slot=1, card=s.hand_cards[1], grid=(7, 11))
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertEqual(len(self.executor.pending), 1)
+        self.assertEqual(
+            self.executor.pending[0].threat_ids,
+            frozenset((9199,)),
+        )
 
     def test_new_enemy_is_not_blocked_by_existing_threat_reservation(self):
         s = state()
