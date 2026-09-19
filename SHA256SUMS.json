@@ -91,7 +91,7 @@
   "tests/native_impact_events.cpp": "add60b1b43e3bac012f7a215764768a06333f6ecc4fa690e6a925cf166080e73",
   "tests/native_projectile_origin.cpp": "c0939edf20a13d4a549bb678c4d0cc3cfbdb14b223d82e38ab562b42ee1b4db8",
   "tests/native_spawn_relations.cpp": "cb21afff8a054be1b8fbdb11cb96f0fbc4d6f5ab3d4ff87768d8d56b238ed30b",
-  "tests/test_ability_state.py": "b42fcee365cfdcf11662f89a09dc7e26f2dbb5a9a27f0ee940b4e2a393cfdd28",
+  "tests/test_ability_state.py": "19ee4346322b674055dc23dc698dc9ebd31842f68953cdf2084b053907e3ca7d",
   "tests/test_area_state.py": "f127c569175f8fdae04d28d92059f251f64df553a037dcdf988fc045b403ebfa",
   "tests/test_cannon_timing.py": "fb5627e8d01dcde10f74a68fa88cbe2630687e530681be1ae0e3afe1058c25fe",
   "tests/test_card_selection.py": "1699bf7bba884735d3be075a49059f0707050746ed258290a7541df09a081f1e",
