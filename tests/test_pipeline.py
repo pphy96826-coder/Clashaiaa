@@ -1056,6 +1056,127 @@ class ExecutorTests(unittest.TestCase):
         self.assertGreaterEqual(acks[0]['latency_ms'], 0)
         self.assertGreaterEqual(acks[0]['input_to_ack_ms'], 0)
 
+    def test_ack_timeout_retries_once_after_fresh_unchanged_frame(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = now - 2.0
+        pending.sent_tick = s.tick
+        pending.input_completed_at = now - 1.5
+        pending.ack_timeout_seconds = 0.01
+        pending.prior_elixir = s.elixir
+        pending.prior_cycle = self.executor._native_cycle(s, first.owner)
+        pending.prior_raw_hand_card = self.executor._raw_hand_card(
+            s, first.hand_slot, first.owner)
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        self.executor.ack_watch.append(pending)
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq))
+
+        s.tick += 1
+        s.received_at = now - 0.5
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(self.executor.ack_watch, [pending])
+        self.assertEqual(pending.retry_probe_tick, s.tick)
+        self.actuator.deploy_action.assert_not_called()
+        self.assertIn('action_retry_armed',
+                      [event for event, _ in self.events])
+
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(pending.retry_count, 1)
+        self.assertEqual(pending.state, 'sent')
+        self.assertIs(self.executor.active, pending)
+        self.actuator.deploy_action.assert_called_once_with(first)
+        self.assertIn('action_retry_queued',
+                      [event for event, _ in self.events])
+        spends = [
+            row for row in self.executor.unconfirmed_spend
+            if row[2] == pending.command_seq
+        ]
+        self.assertEqual(len(spends), 1)
+
+    def test_late_hand_rotation_after_retry_arm_acks_without_replay(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = now - 2.0
+        pending.sent_tick = s.tick
+        pending.input_completed_at = now - 1.5
+        pending.ack_timeout_seconds = 0.01
+        pending.prior_elixir = s.elixir
+        pending.prior_cycle = self.executor._native_cycle(s, first.owner)
+        pending.prior_raw_hand_card = self.executor._raw_hand_card(
+            s, first.hand_slot, first.owner)
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        self.executor.ack_watch.append(pending)
+
+        s.tick += 1
+        s.received_at = now - 0.5
+        self.executor.poll(s, lambda *_: True)
+        self.assertGreaterEqual(pending.retry_probe_tick, 0)
+
+        replacement = s.hand_cards[1]
+        s.hand_cards[0] = replacement
+        player = next(
+            p for p in s.raw['players'] if p['owner'] == first.owner)
+        next(row for row in player['hand'] if row['slot'] == 0)['card_id'] = replacement
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        self.actuator.deploy_action.assert_not_called()
+        acks = [
+            data for event, data in self.events
+            if event == 'hand_ack'
+            and data['command_seq'] == pending.command_seq
+        ]
+        self.assertEqual(acks[-1]['evidence'], 'hand_rotation')
+
+    def test_second_ack_timeout_does_not_retry_again(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = now - 2.0
+        pending.sent_tick = s.tick
+        pending.input_completed_at = now - 1.5
+        pending.ack_timeout_seconds = 0.01
+        pending.prior_elixir = s.elixir
+        pending.prior_cycle = self.executor._native_cycle(s, first.owner)
+        pending.prior_raw_hand_card = self.executor._raw_hand_card(
+            s, first.hand_slot, first.owner)
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        pending.retry_count = 1
+        self.executor.ack_watch.append(pending)
+
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        self.assertNotIn('action_retry_armed',
+                         [event for event, _ in self.events])
+        misses = [
+            data for event, data in self.events
+            if event == 'action_missed'
+            and data['command_seq'] == pending.command_seq
+        ]
+        self.assertEqual(len(misses), 1)
+        self.actuator.deploy_action.assert_not_called()
+
     def test_card_ack_window_survives_stale_frame_past_legacy_timeout(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
