@@ -60,7 +60,9 @@ INCOMING_PUSH_DEFENDER_RELEASE_DEPTH = 18000.0
 INCOMING_PUSH_PUNISH_MIN_ELIXIR = 7.0
 INCOMING_PUSH_PLAY_BIND_TICKS = 16
 INCOMING_PUSH_RECENT_HEAVY_TICKS = 30
+INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH = 14000.0
 INCOMING_PUSH_CORE_DEFENDERS = frozenset((MUSKETEER, CANNON))
+INCOMING_PUSH_HARD_RESERVE_CARDS = frozenset((FIREBALL,))
 
 # Conservative impact envelopes in native world units.  They are deliberately
 # wider than the visual effect so a delayed spell cannot wake an inactive king
@@ -1077,6 +1079,33 @@ class FeatureAdapter:
         """Remove cells the live validator would reject for wrong-lane defense."""
         return cls._mask_to_lane(entry, threat_lane, 'defensive_threat_lane')
 
+    def _mask_to_incoming_defense(self, entry, lane):
+        """Keep preparation plays on the threatened lane and our safe half.
+
+        During build-up we still allow cheap cycle and, once the core gets
+        closer, early defender placement.  What we do not allow is spending
+        those defensive cards as an unrelated opposite-lane commitment or
+        parking them so high that they cannot participate in the incoming
+        fight.
+        """
+        masked = self._mask_to_lane(entry, lane, 'incoming_push_lane')
+        subcell = masked.get('model_subcell_offset') or (0.0, 0.0)
+        dy = float(subcell[1] or 0.0)
+        sign = 1.0 if self.actor_owner == 0 else -1.0
+        rows = []
+        for y, row in enumerate(masked['row_major']):
+            world_y = (float(y) + 0.5 + sign * dy) * 1000.0
+            safe_depth = (
+                self._defensive_depth(world_y)
+                <= INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH
+            )
+            rows.append(tuple(bool(allowed) and safe_depth for allowed in row))
+        masked['row_major'] = tuple(rows)
+        masked['incoming_push_max_defensive_depth'] = (
+            INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH
+        )
+        return masked
+
     def defensive_lane_conflict(self, action, state):
         """Detect an obvious cross-lane defensive placement mistake.
 
@@ -1517,6 +1546,15 @@ class FeatureAdapter:
             recent_heavy.get('bound_entity_id') if recent_heavy else None)
         self.quality['incoming_push_reserve_defenders'] = bool(
             incoming_push and incoming_push.get('reserve_core_defenders'))
+        self.quality['incoming_push_preparing'] = preparing_for_push
+        self.quality['incoming_push_hard_reserve_cards'] = (
+            sorted(INCOMING_PUSH_HARD_RESERVE_CARDS)
+            if preparing_for_push else []
+        )
+        self.quality['incoming_push_defensive_placement_max_depth'] = (
+            INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH
+            if preparing_for_push else None
+        )
         self.quality['neutral_patience_active'] = neutral_patience
         self.quality['attack_opportunity_active'] = attack_opportunity is not None
         self.quality['attack_opportunity_kind'] = (
@@ -1567,12 +1605,18 @@ class FeatureAdapter:
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
-            if (incoming_push is not None
+            if (preparing_for_push
+                    and cid in INCOMING_PUSH_HARD_RESERVE_CARDS):
+                slot_reasons[str(slot)] = (
+                    'strategy_reserve_incoming_push_spell'
+                )
+                continue
+            if (preparing_for_push
                     and cid == HOG_RIDER
                     and float(elixir) < INCOMING_PUSH_PUNISH_MIN_ELIXIR):
                 slot_reasons[str(slot)] = 'strategy_hold_incoming_push'
                 continue
-            if (incoming_push is not None
+            if (preparing_for_push
                     and incoming_push.get('reserve_core_defenders')
                     and cid in INCOMING_PUSH_CORE_DEFENDERS):
                 slot_reasons[str(slot)] = 'strategy_reserve_incoming_push'
@@ -1587,6 +1631,11 @@ class FeatureAdapter:
             if defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
                 entry = self._mask_to_defensive_lane(
                     entry, defensive_lane_gate['threat_lane'])
+            elif (preparing_for_push
+                    and incoming_push.get('lane') is not None
+                    and cid in DEFENSIVE_LANE_CARDS):
+                entry = self._mask_to_incoming_defense(
+                    entry, incoming_push['lane'])
             elif (incoming_push is not None
                     and incoming_push.get('lane') is not None
                     and cid in INCOMING_PUSH_CORE_DEFENDERS):
@@ -1669,6 +1718,13 @@ class FeatureAdapter:
                          if recent_heavy else None),
                      'incoming_push_reserve_defenders': bool(
                          incoming_push and incoming_push.get('reserve_core_defenders')),
+                     'incoming_push_preparing': preparing_for_push,
+                     'incoming_push_hard_reserve_cards': (
+                         sorted(INCOMING_PUSH_HARD_RESERVE_CARDS)
+                         if preparing_for_push else []),
+                     'incoming_push_defensive_placement_max_depth': (
+                         INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH
+                         if preparing_for_push else None),
                      'neutral_patience_active': neutral_patience,
                      'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR,
                      'attack_opportunity_active': attack_opportunity is not None,
