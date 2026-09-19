@@ -576,9 +576,11 @@ class ActionExecutor:
                 # that touch completed. Wait for an authoritative post-input
                 # probe frame; otherwise an older elixir/hand transition can
                 # be misattributed to this action.
-                ack_started_at = pending.input_completed_at or pending.sent_at
-                if (pending.input_completed_at > 0
-                        and state.received_at <= pending.input_completed_at):
+                input_completed_at = float(
+                    getattr(pending, 'input_completed_at', 0.0) or 0.0)
+                ack_started_at = input_completed_at or pending.sent_at
+                if (input_completed_at > 0
+                        and state.received_at <= input_completed_at):
                     continue
                 if skill:
                     row = raw_controller(state, action)
