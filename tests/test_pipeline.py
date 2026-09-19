@@ -372,6 +372,45 @@ class ExecutorTests(unittest.TestCase):
         self.executor.poll(s, lambda *_: True)
         self.assertGreaterEqual(self.executor._post_action_settle_tick, s.tick)
 
+    def test_ack_timeout_with_known_threat_uses_uncertain_local_reservation(self):
+        s = state()
+        add_enemy(s, 9001, 3500, 11500)
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 11))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+        pending.state = 'sent'
+        pending.sent_at = time.perf_counter() - config.ACK_TIMEOUT_SECONDS - 0.1
+        pending.sent_tick = s.tick
+        pending.prior_elixir = s.elixir
+        s.tick += 1
+        self.executor.poll(s, lambda *_: True)
+        self.assertFalse(self.executor.pending)
+        self.assertEqual(self.executor._post_action_settle_tick, -1)
+        self.assertEqual(len(self.executor.threat_reservations), 1)
+        reservation = self.executor.threat_reservations[0]
+        self.assertEqual(reservation.threat_ids, frozenset((9001,)))
+        started = [data for event, data in self.events
+                   if event == 'threat_reservation_started']
+        self.assertEqual(started[-1]['confidence'], 'uncertain')
+        self.assertIn('action_missed', [event for event, _ in self.events])
+
+    def test_ack_timeout_without_known_threat_keeps_global_settle_fallback(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+        pending.state = 'sent'
+        pending.sent_at = time.perf_counter() - config.ACK_TIMEOUT_SECONDS - 0.1
+        pending.sent_tick = s.tick
+        pending.prior_elixir = s.elixir
+        s.tick += 1
+        self.executor.poll(s, lambda *_: True)
+        self.assertFalse(self.executor.threat_reservations)
+        self.assertGreaterEqual(self.executor._post_action_settle_tick, s.tick)
+        reasons = [data.get('reason') for event, data in self.events
+                   if event == 'post_action_settle_armed']
+        self.assertIn('ack_timeout', reasons)
+
     def test_pause_drops_plans_but_reconciles_sent_card_on_resume(self):
         s = state()
         self.executor.submit(SimpleNamespace(actions=(play(), play(slot=1, card=26000014))), s)
