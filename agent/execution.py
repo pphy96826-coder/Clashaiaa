@@ -29,6 +29,7 @@ class PendingAction:
     input_completed_at: float = 0.0
     threat_ids: frozenset = frozenset()
     threat_target: tuple[float, float] | None = None
+    ack_timeout_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class ActionExecutor:
         self._recent_misses = {}
         self._confirmed_for_simulation = []
         self._latency_samples_ms = []
+        self._ack_latency_samples_ms = []
         self.end_to_end_latency_ms = float(config.PREDICTION_LATENCY_COMPENSATION_MS)
         self._post_action_settle_tick = -1
         self._post_action_preview = None
@@ -113,6 +115,7 @@ class ActionExecutor:
         self._decision_blocked_until = 0.0
         self._recent_misses.clear()
         self._confirmed_for_simulation.clear()
+        self._ack_latency_samples_ms.clear()
         self._post_action_settle_tick = -1
         self._post_action_preview = None
 
@@ -146,6 +149,45 @@ class ActionExecutor:
         if time.perf_counter() < self._decision_blocked_until:
             return True
         return state is not None and self._post_action_settle_tick >= 0 and state.tick < self._post_action_settle_tick
+
+    def _card_ack_timeout_seconds(self):
+        """Return a bounded ACK budget without stalling unrelated slots.
+
+        Card ACK telemetry can lag Android input completion by close to a
+        second on busy emulator frames.  Keep a one-second floor, expand it
+        modestly when recent input/ACK latency is slow, and cap it below the
+        resource-reservation horizon.  Only the submitted slot remains locked
+        while this budget runs; other slots may continue normally.
+        """
+        timeout = float(config.CARD_ACK_TIMEOUT_BASE_SECONDS)
+        input_based = (
+            float(config.ACK_TIMEOUT_SECONDS)
+            + float(config.CARD_ACK_TIMEOUT_INPUT_MULTIPLIER)
+            * max(0.0, float(self.end_to_end_latency_ms)) / 1000.0
+        )
+        timeout = max(timeout, input_based)
+        if self._ack_latency_samples_ms:
+            ordered = sorted(self._ack_latency_samples_ms[-12:])
+            # A small recent p80 is robust to one-off spikes while still
+            # following sustained slow probe/guest hand rotation.
+            index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.8) - 1))
+            observed = (
+                ordered[index] / 1000.0
+                + float(config.CARD_ACK_TIMEOUT_MARGIN_SECONDS)
+            )
+            timeout = max(timeout, observed)
+        return max(
+            float(config.CARD_ACK_TIMEOUT_BASE_SECONDS),
+            min(float(config.CARD_ACK_TIMEOUT_MAX_SECONDS), timeout),
+        )
+
+    def _record_card_ack_latency(self, latency_ms):
+        if not isinstance(latency_ms, (int, float)) or not math.isfinite(latency_ms):
+            return
+        if latency_ms < 0:
+            return
+        self._ack_latency_samples_ms.append(float(latency_ms))
+        self._ack_latency_samples_ms[:] = self._ack_latency_samples_ms[-12:]
 
     @staticmethod
     def _candidate_key(decoded):
@@ -582,6 +624,11 @@ class ActionExecutor:
                 # UNKNOWN halfway through its own input transaction.
                 completed = self.active
                 completed.input_completed_at = completed_at
+                completed.ack_timeout_seconds = (
+                    float(config.ACK_TIMEOUT_SECONDS)
+                    if completed.action.kind.value == 'activate_ability'
+                    else self._card_ack_timeout_seconds()
+                )
                 if completed in self.pending:
                     self.pending.remove(completed)
                 if completed not in self.ack_watch:
@@ -595,7 +642,8 @@ class ActionExecutor:
                          command_seq=completed.command_seq,
                          card=completed.action.card_id,
                          slot=completed.action.hand_slot,
-                         watches=len(self.ack_watch))
+                         watches=len(self.ack_watch),
+                         timeout_ms=round(completed.ack_timeout_seconds * 1000))
             except Exception as exc:
                 self.fault = str(exc)
                 self.pending.clear()
@@ -659,6 +707,11 @@ class ActionExecutor:
                                  source_entity=action.source_entity, command_seq=pending.command_seq,
                                  outcome='unknown')
                     continue
+                ack_timeout_seconds = float(
+                    getattr(pending, 'ack_timeout_seconds', 0.0) or 0.0)
+                if ack_timeout_seconds <= 0:
+                    ack_timeout_seconds = self._card_ack_timeout_seconds()
+                    pending.ack_timeout_seconds = ack_timeout_seconds
                 hand_changed = (state.tick > pending.sent_tick and
                                 state.hand_cards[action.hand_slot] != action.card_id)
 
@@ -783,12 +836,15 @@ class ActionExecutor:
                         # hand rotation/guard expiry reconciles the snapshot.
                         if elixir_changed:
                             self._clear_spend(pending.command_seq)
+                    ack_latency_ms = (now - ack_started_at) * 1000
+                    self._record_card_ack_latency(ack_latency_ms)
                     self.log('hand_ack', card=action.card_id, slot=action.hand_slot,
                         command_seq=pending.command_seq,
-                        tick=state.tick, latency_ms=(now-ack_started_at)*1000,
+                        tick=state.tick, latency_ms=ack_latency_ms,
                         decision_to_ack_ms=(now-pending.decision_at)*1000,
-                        input_to_ack_ms=(now-ack_started_at)*1000,
+                        input_to_ack_ms=ack_latency_ms,
                         input_start_to_ack_ms=(now-pending.sent_at)*1000,
+                        ack_timeout_ms=round(ack_timeout_seconds * 1000),
                         outcome='accepted',
                         evidence=ack_evidence,
                         spawn_entity_id=spawn_entity_id)
@@ -817,7 +873,7 @@ class ActionExecutor:
                                  command_seq=pending.command_seq,
                                  card=action.card_id,
                                  reason='background_hand_ack')
-                elif now - ack_started_at > config.ACK_TIMEOUT_SECONDS:
+                elif now - ack_started_at > ack_timeout_seconds:
                     self.ack_watch.remove(pending)
                     # A missing ACK is ambiguous: the touch may have reached
                     # the game while telemetry was late.  Keep its virtual
@@ -836,6 +892,7 @@ class ActionExecutor:
                     self.log('action_missed', card=action.card_id, slot=action.hand_slot,
                              command_seq=pending.command_seq, outcome='unknown',
                              continue_running=True,
+                             ack_timeout_ms=round(ack_timeout_seconds * 1000),
                              uncertain_prediction_seconds=config.UNCERTAIN_PREDICTION_SECONDS)
                     # A missed touch leaves the live hand unchanged.  Give
                     # the next probe frame time to arrive and suppress only
