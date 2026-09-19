@@ -175,6 +175,12 @@ class ActionExecutor:
             * max(0.0, float(self.end_to_end_latency_ms)) / 1000.0
         )
         timeout = max(timeout, input_based)
+        # The first few accepted card ACKs are the only live phase where the
+        # guest hand/probe path repeatedly exceeded the normal floor. Borrow
+        # the already-bounded max window until enough real ACK samples exist;
+        # after that, fall back to the normal adaptive p80 + margin logic.
+        if len(self._ack_latency_samples_ms) < int(config.CARD_ACK_BOOTSTRAP_SAMPLES):
+            return float(config.CARD_ACK_TIMEOUT_MAX_SECONDS)
         if self._ack_latency_samples_ms:
             ordered = sorted(self._ack_latency_samples_ms[-12:])
             # A small recent p80 is robust to one-off spikes while still
