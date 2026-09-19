@@ -125,5 +125,6 @@
   "tools/launch_menu.py": "524f40e775cb64c84c3aa60df066b43b1bd453b3d69d8ced1894714a177680bd",
   "tools/package_release.py": "c6c6fae0806ea1f8f7ecd9aa4fd218f4c9586c7ef70a7edc540416876926305e",
   "tools/preflight.py": "7fc93853832bc35948c3f4631cb6a1dc13ffad3a2fd3ee7f60e2376ceafb8132",
-  "upstream.lock.json": "e959e38e60076d95f56bd86d901faf3480ca55cd4624a8b3687807f7588536d4"
+  "upstream.lock.json": "e959e38e60076d95f56bd86d901faf3480ca55cd4624a8b3687807f7588536d4",
+  "bridge/adb_runtime.py": "962a1859569ea58ebc81aa1b6c3e3466c1b662a12a761711ec546e880625342f"
 }
