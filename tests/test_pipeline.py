@@ -1260,7 +1260,7 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(len(extended), 1)
         self.assertGreater(extended[0]['remaining_ms'], 0)
 
-    def test_slot_consume_guard_hard_timeout_releases_stale_slot_and_spend(self):
+    def test_slot_consume_guard_stays_blocked_after_spend_window_until_rotation(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
         self.executor.submit(SimpleNamespace(actions=(first,)), s)
@@ -1279,13 +1279,28 @@ class ExecutorTests(unittest.TestCase):
 
         self.executor._prune_slot_consume_guards(s, now)
 
-        self.assertNotIn(0, self.executor.slot_consume_guards)
+        # The extra virtual spend can expire, but a positively ACKed card must
+        # never become replayable from an unchanged native hand slot.
+        self.assertIn(0, self.executor.slot_consume_guards)
         self.assertEqual(self.executor.reserved_elixir, 0)
+        stale = [
+            data for event, data in self.events
+            if event == 'slot_consume_guard_stale'
+        ]
+        self.assertEqual(len(stale), 1)
+        self.assertTrue(stale[0]['slot_remains_blocked'])
+        self.assertIn(0, self.executor.blocked_slots(s))
+
+        # Authoritative hand rotation is the only normal release condition.
+        s.hand_cards[0] = s.hand_cards[1]
+        s.tick += 1
+        self.assertNotIn(0, self.executor.blocked_slots(s))
+        self.assertFalse(self.executor.slot_consume_guards)
         cleared = [
             data for event, data in self.events
             if event == 'slot_consume_guard_cleared'
         ]
-        self.assertEqual(cleared[-1]['reason'], 'stale_hand_timeout')
+        self.assertEqual(cleared[-1]['reason'], 'hand_rotation')
 
     def test_spawn_ack_keeps_virtual_spend_until_hand_rotation(self):
         s = state()
