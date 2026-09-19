@@ -1320,6 +1320,102 @@ class AdapterTests(unittest.TestCase):
         self.assertIsNone(o.entities[0].card_id)
 
 
+    def test_bridge_ranged_prelock_triggers_before_tower_target(self):
+        a, s = self.adapter()
+
+        add_enemy(
+            s, 9301, 3500, 12000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        ctx = a.prelock_context(s, 100.0)
+
+        self.assertIsNotNone(ctx)
+        self.assertIn(
+            ctx['state'],
+            ('prelock_urgent', 'critical'),
+        )
+        self.assertEqual(ctx['enemy_id'], 9301)
+        self.assertEqual(ctx['lane'], 'left')
+        self.assertIn(
+            ctx['reason'],
+            (
+                'tower_in_attack_range',
+                'new_close_to_lock_envelope',
+            ),
+        )
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['prelock_enemy_id'],
+            9301,
+        )
+
+        # HOG is slot 2 in the 2.6 opening fixture. Emergency defence
+        # suppresses a new offensive commit.
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_prelock_defense',
+        )
+
+    def test_fast_melee_prelock_triggers_from_closing_eta(self):
+        a, s = self.adapter()
+
+        add_enemy(
+            s, 9302, 3500, 15000,
+            card_id=26000021, hp=1400,
+        )
+        s.tick += 1
+        a.prelock_context(s, 100.0)
+
+        enemy = next(
+            e for e in s.entities if e['id'] == 9302)
+
+        enemy['y'] = 13500
+        s.tick += 1
+
+        ctx = a.prelock_context(s, 100.0)
+
+        self.assertIsNotNone(ctx)
+        self.assertIn(
+            ctx['state'],
+            ('prelock_urgent', 'critical'),
+        )
+        self.assertEqual(
+            ctx['reason'],
+            'predicted_lock_eta',
+        )
+        self.assertGreater(
+            ctx['closing_speed_per_tick'], 0)
+        self.assertLess(
+            ctx['latest_safe_response_ms'],
+            config.PRELOCK_URGENT_MS,
+        )
+
+    def test_slow_tank_does_not_trigger_prelock_too_early(self):
+        a, s = self.adapter()
+
+        add_enemy(
+            s, 9303, 3500, 15000,
+            card_id=26000003, hp=3000,
+        )
+        s.tick += 1
+        a.prelock_context(s, 100.0)
+
+        enemy = next(
+            e for e in s.entities if e['id'] == 9303)
+
+        enemy['y'] = 14950
+        s.tick += 1
+
+        ctx = a.prelock_context(s, 100.0)
+
+        self.assertIsNone(ctx)
+
+
 class ExecutorTests(unittest.TestCase):
     def setUp(self):
         self.events = []
@@ -1329,6 +1425,138 @@ class ExecutorTests(unittest.TestCase):
 
     def tearDown(self):
         self.executor.close()
+
+
+    def test_new_prelock_threat_interrupts_post_action_settle(self):
+        s = state()
+
+        self.executor._post_action_settle_tick = (
+            s.tick + 4
+        )
+        self.executor._post_action_preview = {
+            'key': (26000030, 0, (3, 10)),
+            'score': 0.5,
+            'tick': s.tick,
+        }
+
+        ctx = {
+            'enemy_id': 9401,
+            'enemy_card_id': 26000014,
+            'state': 'prelock_urgent',
+            'reason': 'predicted_lock_eta',
+            'latest_safe_response_ms': 250.0,
+        }
+
+        self.assertTrue(
+            self.executor.interrupt_post_action_recheck(
+                ctx, s)
+        )
+        self.assertEqual(
+            self.executor._post_action_settle_tick,
+            -1,
+        )
+        self.assertIsNone(
+            self.executor._post_action_preview)
+
+    def test_reserved_prelock_threat_cannot_interrupt_and_repeat(self):
+        s = state()
+
+        add_enemy(
+            s, 9402, 3500, 10000,
+            card_id=26000014, hp=1000,
+        )
+
+        now = time.perf_counter()
+
+        self.executor.threat_reservations.append(
+            SimpleNamespace(
+                command_seq=77,
+                owner=s.local_owner,
+                card_id=28000011,
+                threat_ids=frozenset((9402,)),
+                expires_at=now + 1.0,
+                confidence='provisional',
+            )
+        )
+
+        self.executor._post_action_settle_tick = (
+            s.tick + 4
+        )
+
+        ctx = {
+            'enemy_id': 9402,
+            'enemy_card_id': 26000014,
+            'state': 'critical',
+            'reason': 'tower_in_attack_range',
+            'latest_safe_response_ms': 0.0,
+        }
+
+        self.assertTrue(
+            self.executor.prelock_reservation_conflict(
+                ctx, s)
+        )
+
+        self.assertFalse(
+            self.executor.interrupt_post_action_recheck(
+                ctx, s)
+        )
+
+        self.assertEqual(
+            self.executor._post_action_settle_tick,
+            s.tick + 4,
+        )
+
+    def test_other_lane_new_prelock_threat_can_interrupt(self):
+        s = state()
+
+        add_enemy(
+            s, 9403, 3500, 10000,
+            card_id=26000014, hp=1000,
+        )
+        add_enemy(
+            s, 9404, 14500, 10000,
+            card_id=26000014, hp=1000,
+        )
+
+        now = time.perf_counter()
+
+        self.executor.threat_reservations.append(
+            SimpleNamespace(
+                command_seq=78,
+                owner=s.local_owner,
+                card_id=28000011,
+                threat_ids=frozenset((9403,)),
+                expires_at=now + 1.0,
+                confidence='provisional',
+            )
+        )
+
+        self.executor._post_action_settle_tick = (
+            s.tick + 4
+        )
+
+        ctx = {
+            'enemy_id': 9404,
+            'enemy_card_id': 26000014,
+            'state': 'critical',
+            'reason': 'tower_in_attack_range',
+            'latest_safe_response_ms': 0.0,
+        }
+
+        self.assertFalse(
+            self.executor.prelock_reservation_conflict(
+                ctx, s)
+        )
+
+        self.assertTrue(
+            self.executor.interrupt_post_action_recheck(
+                ctx, s)
+        )
+
+        self.assertEqual(
+            self.executor._post_action_settle_tick,
+            -1,
+        )
 
     def test_wait_does_not_touch(self):
         self.executor.submit(SimpleNamespace(actions=(ActionV1(owner=0,kind=ActionKind.WAIT),)), state())

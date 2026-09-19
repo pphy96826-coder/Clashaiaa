@@ -165,6 +165,7 @@ class FeatureAdapter:
         self._last_opponent_exact_play = None
         self._recent_opponent_heavy_plays = deque(maxlen=8)
         self._incoming_push_cores = {}
+        self._prelock_context = None
 
     def _effect_provenance(self, semantic, entity_id):
         if not self._effects_by_entity.get(entity_id, ((), False))[1]:
@@ -672,6 +673,314 @@ class FeatureAdapter:
 
         if best is None or best['distance'] > ATTACK_HOLD_TOWER_DISTANCE:
             return None
+        return best
+
+
+    def _prelock_princess_towers(self, state):
+        """Return living own princess towers from authoritative telemetry."""
+        own_y = 6500.0 if self.actor_owner == 0 else 25500.0
+        rows = []
+
+        for ent in state.entities:
+            if int(ent.get('owner', -1)) != self.actor_owner:
+                continue
+            if int(ent.get('card_id', 0)) != -1:
+                continue
+
+            hp = ent.get('hp')
+            if not isinstance(hp, (int, float)) or float(hp) <= 0:
+                continue
+
+            x, y = probe_to_world(ent.get('x', -1), ent.get('y', -1))
+
+            if y != own_y or x not in (3500.0, 14500.0):
+                continue
+
+            rows.append({
+                'tower_id': int(ent['id']),
+                'kind': (
+                    'princess_left'
+                    if x == 3500.0
+                    else 'princess_right'
+                ),
+                'lane': 'left' if x < 9000.0 else 'right',
+                'x': float(x),
+                'y': float(y),
+            })
+
+        return tuple(rows)
+
+    @staticmethod
+    def _prelock_attack_range_world(spec):
+        if spec is None:
+            return None
+
+        tiles = getattr(spec, 'range_tiles', None)
+
+        if (
+            isinstance(tiles, (int, float))
+            and math.isfinite(float(tiles))
+            and float(tiles) >= 0.0
+        ):
+            return float(tiles) * 1000.0
+
+        return None
+
+    @staticmethod
+    def _prelock_deployment_remaining_ms(entity):
+        raw = entity.get('deployment_runtime')
+
+        if not isinstance(raw, dict):
+            return 0.0
+
+        if raw.get('validated') is not True:
+            return 0.0
+
+        remaining = raw.get('remaining_ms')
+
+        if type(remaining) is int and remaining >= 0:
+            return float(remaining)
+
+        return 0.0
+
+    def prelock_context(
+            self, state, input_latency_ms, excluded_enemy_ids=()):
+        """Find an enemy whose tower-lock window is about to close.
+
+        The detector acts before first damage. It combines public board
+        geometry, CardSpec attack range, measured velocity and validated
+        native target acquisition. Unknown first-frame movement uses a short
+        conservative envelope only when the new unit is already near its
+        firing/lock radius.
+        """
+        self.observe(state)
+
+        excluded = {
+            int(v) for v in excluded_enemy_ids
+            if isinstance(v, int) and int(v) > 0
+        }
+
+        towers = self._prelock_princess_towers(state)
+
+        if not towers:
+            self._prelock_context = None
+            return None
+
+        live = live_entities(state.entities)
+
+        safety_ms = (
+            max(0.0, float(input_latency_ms or 0.0))
+            + float(config.PRELOCK_SAFETY_MARGIN_MS)
+        )
+
+        best = None
+
+        for ent in live.values():
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+
+            entity_id = ent.get('id')
+            card_id = ent.get('card_id')
+
+            if type(entity_id) is not int or entity_id <= 0:
+                continue
+            if entity_id in excluded:
+                continue
+            if type(card_id) is not int or card_id <= 0:
+                continue
+
+            hp = ent.get('hp')
+            if isinstance(hp, (int, float)) and float(hp) <= 0:
+                continue
+
+            spec = self.bundle.card_specs.get(int(card_id))
+
+            # Effects/spells/buildings are not walking tower-lock threats.
+            if spec is not None and spec.kind.value != 'troop':
+                continue
+
+            ex, ey = probe_to_world(ent['x'], ent['y'])
+
+            measured_attack = attack_state(
+                ent, state.tick, live)
+
+            targeted_tower = None
+
+            if (
+                measured_attack is not None
+                and measured_attack.target_entity is not None
+            ):
+                targeted_tower = next(
+                    (
+                        tower for tower in towers
+                        if tower['tower_id']
+                        == int(measured_attack.target_entity)
+                    ),
+                    None,
+                )
+
+            nearest = targeted_tower or min(
+                towers,
+                key=lambda tower:
+                    (
+                        (tower['x'] - ex) ** 2
+                        + (tower['y'] - ey) ** 2
+                    ),
+            )
+
+            dx = nearest['x'] - ex
+            dy = nearest['y'] - ey
+            distance = math.hypot(dx, dy)
+
+            attack_range = self._prelock_attack_range_world(spec)
+
+            # Same small collision allowance already used by the forecasting
+            # path when deciding whether a target is inside static range.
+            lock_radius = (
+                float(attack_range) + 750.0
+                if attack_range is not None
+                else 750.0
+            )
+
+            distance_to_lock = max(
+                0.0, distance - lock_radius)
+
+            deployment_ms = (
+                self._prelock_deployment_remaining_ms(ent)
+            )
+
+            velocity = self._velocity.get(int(entity_id))
+            closing_speed = 0.0
+
+            if velocity is not None and distance > 1.0:
+                vx, vy = velocity
+                closing_speed = max(
+                    0.0,
+                    (
+                        float(vx) * dx
+                        + float(vy) * dy
+                    ) / distance,
+                )
+
+            reason = None
+
+            if targeted_tower is not None:
+                # This is already later than our preferred pre-lock path, but
+                # remains an authoritative critical fallback.
+                lock_eta_ms = deployment_ms
+                reason = 'tower_target_acquired'
+
+            elif (
+                attack_range is not None
+                and distance_to_lock <= 0.0
+            ):
+                # Ranged bridge units can satisfy this on their first visible
+                # frame, before attack-runtime exposes a target.
+                lock_eta_ms = deployment_ms
+                reason = 'tower_in_attack_range'
+
+            elif (
+                closing_speed
+                >= float(config.PRELOCK_MIN_CLOSING_SPEED)
+            ):
+                travel_ticks = (
+                    distance_to_lock / closing_speed
+                )
+
+                travel_ms = (
+                    travel_ticks
+                    * float(config.TICK_SECONDS)
+                    * 1000.0
+                )
+
+                lock_eta_ms = max(
+                    deployment_ms, travel_ms)
+
+                reason = 'predicted_lock_eta'
+
+            else:
+                first_seen = int(
+                    self._first_seen.get(
+                        int(entity_id), int(state.tick))
+                )
+
+                age_ticks = max(
+                    0, int(state.tick) - first_seen)
+
+                if (
+                    age_ticks
+                    <= int(config.PRELOCK_NEW_ENTITY_TICKS)
+                    and distance_to_lock
+                    <= float(
+                        config.PRELOCK_FALLBACK_DISTANCE_WORLD)
+                ):
+                    # First-frame bridge ranged threat: no reliable measured
+                    # velocity exists yet, but it is already only a few tiles
+                    # from its own lock envelope.
+                    lock_eta_ms = (
+                        safety_ms
+                        + float(config.PRELOCK_URGENT_MS)
+                        - 1.0
+                    )
+
+                    reason = 'new_close_to_lock_envelope'
+
+                else:
+                    continue
+
+            latest_safe_ms = (
+                float(lock_eta_ms) - safety_ms)
+
+            if targeted_tower is not None:
+                urgency = 'critical'
+
+            elif (
+                latest_safe_ms
+                <= float(config.PRELOCK_CRITICAL_MS)
+            ):
+                urgency = 'critical'
+
+            elif (
+                latest_safe_ms
+                <= float(config.PRELOCK_URGENT_MS)
+            ):
+                urgency = 'prelock_urgent'
+
+            else:
+                continue
+
+            candidate = {
+                'state': urgency,
+                'reason': reason,
+                'enemy_id': int(entity_id),
+                'enemy_card_id': int(card_id),
+                'tower_id': int(nearest['tower_id']),
+                'tower_kind': nearest['kind'],
+                'lane': nearest['lane'],
+                'enemy_x': float(ex),
+                'enemy_y': float(ey),
+                'distance': float(distance),
+                'distance_to_lock': float(distance_to_lock),
+                'attack_range': (
+                    float(attack_range)
+                    if attack_range is not None
+                    else None
+                ),
+                'closing_speed_per_tick': float(closing_speed),
+                'lock_eta_ms': float(lock_eta_ms),
+                'latest_safe_response_ms': float(
+                    latest_safe_ms),
+                'tick': int(state.tick),
+            }
+
+            if (
+                best is None
+                or candidate['latest_safe_response_ms']
+                < best['latest_safe_response_ms']
+            ):
+                best = candidate
+
+        self._prelock_context = best
         return best
 
     def _incoming_push_context(self):
@@ -1607,6 +1916,30 @@ class FeatureAdapter:
         defensive_lane_gate = self._single_defensive_threat_lane()
         self.quality['defensive_threat_lane'] = (
             defensive_lane_gate['threat_lane'] if defensive_lane_gate else None)
+        prelock = (
+            self._prelock_context
+            if self._prelock_context is not None
+            and int(self._prelock_context.get('tick', -1))
+                == int(state.tick)
+            else None
+        )
+        prelock_lane = (
+            prelock.get('lane') if prelock else None
+        )
+        self.quality['prelock_state'] = (
+            prelock.get('state') if prelock else None)
+        self.quality['prelock_reason'] = (
+            prelock.get('reason') if prelock else None)
+        self.quality['prelock_enemy_id'] = (
+            prelock.get('enemy_id') if prelock else None)
+        self.quality['prelock_enemy_card_id'] = (
+            prelock.get('enemy_card_id') if prelock else None)
+        self.quality['prelock_tower_id'] = (
+            prelock.get('tower_id') if prelock else None)
+        self.quality['prelock_latest_safe_response_ms'] = (
+            prelock.get('latest_safe_response_ms')
+            if prelock else None
+        )
         opponent_elixir_bounds = None
         tracker = getattr(self.tensorizer, 'tracker', None)
         if tracker is not None and hasattr(tracker, 'elixir_bounds'):
@@ -1620,7 +1953,9 @@ class FeatureAdapter:
         self.quality['opponent_elixir_upper'] = (
             opponent_elixir_bounds[1] if opponent_elixir_bounds else None)
         near_tower_pressure = self._near_tower_pressure()
-        defensive_pressure = self._has_defensive_pressure()
+        defensive_pressure = (
+            self._has_defensive_pressure() or prelock is not None
+        )
         incoming_push = self._incoming_push_context()
         preparing_for_push = (
             incoming_push is not None
@@ -1833,6 +2168,9 @@ class FeatureAdapter:
             if elixir < spec.elixir_cost:
                 slot_reasons[str(slot)] = 'insufficient_elixir'
                 continue
+            if prelock is not None and cid == HOG_RIDER:
+                slot_reasons[str(slot)] = 'strategy_prelock_defense'
+                continue
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
@@ -1899,7 +2237,12 @@ class FeatureAdapter:
             entry = self.build_placement_mask(cid, lanes, towers, entities,
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
                 ability_hud=ability_hud)
-            if (defending_incoming_push
+            if (prelock is not None
+                    and prelock_lane is not None
+                    and cid in DEFENSIVE_LANE_CARDS):
+                entry = self._mask_to_defensive_lane(
+                    entry, prelock_lane)
+            elif (defending_incoming_push
                     and cid in (INCOMING_PUSH_CORE_DEFENDERS | frozenset((ICE_GOLEM,)))):
                 entry = self._mask_to_heavy_defense_role(
                     entry, cid, incoming_push['lane'])
@@ -1963,6 +2306,30 @@ class FeatureAdapter:
                      'defensive_threat_lane': (
                          defensive_lane_gate['threat_lane']
                          if defensive_lane_gate else None),
+                     'prelock_state': (
+                         prelock.get('state') if prelock else None),
+                     'prelock_reason': (
+                         prelock.get('reason') if prelock else None),
+                     'prelock_enemy_id': (
+                         prelock.get('enemy_id') if prelock else None),
+                     'prelock_enemy_card_id': (
+                         prelock.get('enemy_card_id') if prelock else None),
+                     'prelock_tower_id': (
+                         prelock.get('tower_id') if prelock else None),
+                     'prelock_lane': (
+                         prelock.get('lane') if prelock else None),
+                     'prelock_distance': (
+                         prelock.get('distance') if prelock else None),
+                     'prelock_distance_to_lock': (
+                         prelock.get('distance_to_lock')
+                         if prelock else None),
+                     'prelock_attack_range': (
+                         prelock.get('attack_range') if prelock else None),
+                     'prelock_lock_eta_ms': (
+                         prelock.get('lock_eta_ms') if prelock else None),
+                     'prelock_latest_safe_response_ms': (
+                         prelock.get('latest_safe_response_ms')
+                         if prelock else None),
                      'attack_hold_reason': (
                          attack_hold['reason'] if attack_hold else None),
                      'attack_hold_distance': (

@@ -170,6 +170,45 @@ if POST_ACTION_SETTLE_TICKS < 0:
 if not 0.0 < POST_ACTION_RECHECK_MIN_SCORE_RATIO <= 1.0:
     raise ValueError('post_action_recheck_min_score_ratio must be in (0, 1]')
 
+
+# Pre-lock tower defence.
+#
+# This is deliberately earlier than first damage / tower lock. It estimates
+# when an approaching troop enters a princess tower's attack-acquisition
+# envelope, subtracts measured host/input latency and a safety margin, then
+# allows one immediate policy turn if the remaining safe response budget is
+# small.
+PRELOCK_URGENT_MS = float(
+    SETTINGS.get('prelock_urgent_ms', 850.0))
+PRELOCK_CRITICAL_MS = float(
+    SETTINGS.get('prelock_critical_ms', 300.0))
+PRELOCK_SAFETY_MARGIN_MS = float(
+    SETTINGS.get('prelock_safety_margin_ms', 180.0))
+
+# Used only before a reliable second position sample exists. A newly observed
+# ranged threat must already be close to its own attack-range envelope; merely
+# crossing the bridge is not enough.
+PRELOCK_FALLBACK_DISTANCE_WORLD = float(
+    SETTINGS.get('prelock_fallback_distance_world', 3500.0))
+PRELOCK_NEW_ENTITY_TICKS = int(
+    SETTINGS.get('prelock_new_entity_ticks', 8))
+PRELOCK_MIN_CLOSING_SPEED = float(
+    SETTINGS.get('prelock_min_closing_speed', 20.0))
+
+if PRELOCK_URGENT_MS <= 0:
+    raise ValueError('prelock_urgent_ms must be positive')
+if PRELOCK_CRITICAL_MS < 0 or PRELOCK_CRITICAL_MS >= PRELOCK_URGENT_MS:
+    raise ValueError(
+        'prelock_critical_ms must be >= 0 and below prelock_urgent_ms')
+if PRELOCK_SAFETY_MARGIN_MS < 0:
+    raise ValueError('prelock_safety_margin_ms must be non-negative')
+if PRELOCK_FALLBACK_DISTANCE_WORLD <= 0:
+    raise ValueError('prelock_fallback_distance_world must be positive')
+if PRELOCK_NEW_ENTITY_TICKS < 0:
+    raise ValueError('prelock_new_entity_ticks must be non-negative')
+if PRELOCK_MIN_CLOSING_SPEED < 0:
+    raise ValueError('prelock_min_closing_speed must be non-negative')
+
 # Compatibility helper: grid indices are cell centers, including subcell.
 # New execution code takes the whole decoded ActionV1 (and its owner).
 def model_grid_to_screen(grid_x, grid_y, subcell_offset=(0.0, 0.0)):

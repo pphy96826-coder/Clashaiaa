@@ -195,6 +195,66 @@ class ActionExecutor:
             return True
         return state is not None and self._post_action_settle_tick >= 0 and state.tick < self._post_action_settle_tick
 
+
+    def prelock_reserved_threat_ids(self, state):
+        """Return active threat IDs whose submitted response still suppresses."""
+        if state is None:
+            return frozenset()
+
+        now = time.perf_counter()
+        self._prune_threat_reservations(state, now)
+
+        ids = set()
+
+        for reservation in tuple(self.threat_reservations):
+            suppress, _, _ = self._reservation_still_suppresses(
+                reservation, state, now)
+
+            if suppress:
+                ids.update(int(v) for v in reservation.threat_ids)
+
+        return frozenset(ids)
+
+    def prelock_reservation_conflict(self, context, state):
+        """Whether this urgent enemy already has an active response."""
+        if not context or state is None:
+            return False
+
+        enemy_id = int(context.get('enemy_id') or 0)
+
+        if enemy_id <= 0:
+            return False
+
+        return (
+            enemy_id
+            in self.prelock_reserved_threat_ids(state)
+        )
+
+    def interrupt_post_action_recheck(self, context, state):
+        """Allow a genuinely new urgent threat to bypass the old preview."""
+        if not context:
+            return False
+
+        if self.prelock_reservation_conflict(context, state):
+            return False
+
+        if self._post_action_settle_tick >= 0:
+            self.log(
+                'prelock_post_action_interrupted',
+                enemy_id=context.get('enemy_id'),
+                enemy_card_id=context.get('enemy_card_id'),
+                prelock_state=context.get('state'),
+                reason=context.get('reason'),
+                latest_safe_response_ms=context.get(
+                    'latest_safe_response_ms'),
+                previous_settle_tick=self._post_action_settle_tick,
+            )
+
+            self._post_action_settle_tick = -1
+            self._post_action_preview = None
+
+        return True
+
     def _card_ack_timeout_seconds(self):
         """Return a bounded ACK budget without stalling unrelated slots.
 

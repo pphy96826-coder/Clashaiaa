@@ -204,6 +204,9 @@ class CustomCardDeployAgent:
         simulation_entities = None
         auto_emotes = False
         next_emote_at = 0.0
+        last_prelock_fast_key = None
+        last_prelock_diag_key = None
+        last_prelock_conflict_key = None
         match_count = 0
         lifecycle = None
         if continuous:
@@ -452,6 +455,9 @@ class CustomCardDeployAgent:
                             break
                         last_seen_tick = -1
                         last_decision_tick = -1
+                        last_prelock_fast_key = None
+                        last_prelock_diag_key = None
+                        last_prelock_conflict_key = None
                         ended = None
                         suspended = False
                         wait_since = None
@@ -561,6 +567,9 @@ class CustomCardDeployAgent:
                         continue
                     identity = state.identity
                     last_decision_tick = -1
+                    last_prelock_fast_key = None
+                    last_prelock_diag_key = None
+                    last_prelock_conflict_key = None
                     ended = None
                     wait_since = None
                 last_seen_tick = state.tick
@@ -569,6 +578,170 @@ class CustomCardDeployAgent:
                     # Reconcile completed input before doing any synchronous
                     # offline work, so mirror RPCs cannot delay touch ACKs.
                     self.executor.poll(state, self._validate_action)
+
+                    # Detect a tower-lock threat before ordinary cadence gates.
+                    # A threat already covered by an active reservation is
+                    # excluded so an unrelated second-lane threat can still
+                    # become the emergency candidate immediately.
+                    raw_prelock = self.adapter.prelock_context(
+                        state,
+                        self.executor.end_to_end_latency_ms,
+                    )
+
+                    reserved_prelock_ids = (
+                        self.executor.prelock_reserved_threat_ids(state)
+                    )
+
+                    raw_prelock_conflict = bool(
+                        raw_prelock is not None
+                        and int(raw_prelock['enemy_id'])
+                            in reserved_prelock_ids
+                    )
+
+                    if raw_prelock_conflict:
+                        conflict_key = (
+                            int(raw_prelock['enemy_id']),
+                            str(raw_prelock['state']),
+                            str(raw_prelock['reason']),
+                        )
+
+                        if conflict_key != last_prelock_conflict_key:
+                            self.log(
+                                'prelock_threat',
+                                tick=state.tick,
+                                prelock_state=raw_prelock['state'],
+                                reason=raw_prelock['reason'],
+                                enemy_id=raw_prelock['enemy_id'],
+                                enemy_card_id=raw_prelock[
+                                    'enemy_card_id'],
+                                tower_id=raw_prelock['tower_id'],
+                                lane=raw_prelock['lane'],
+                                distance=round(
+                                    raw_prelock['distance'], 1),
+                                distance_to_lock=round(
+                                    raw_prelock[
+                                        'distance_to_lock'], 1),
+                                attack_range=(
+                                    round(
+                                        raw_prelock[
+                                            'attack_range'], 1)
+                                    if raw_prelock[
+                                        'attack_range'] is not None
+                                    else None
+                                ),
+                                closing_speed_per_tick=round(
+                                    raw_prelock[
+                                        'closing_speed_per_tick'], 2),
+                                lock_eta_ms=round(
+                                    raw_prelock['lock_eta_ms'], 1),
+                                latest_safe_response_ms=round(
+                                    raw_prelock[
+                                        'latest_safe_response_ms'], 1),
+                                reservation_conflict=True,
+                                fast_path=False,
+                            )
+
+                            last_prelock_conflict_key = conflict_key
+
+                        prelock = self.adapter.prelock_context(
+                            state,
+                            self.executor.end_to_end_latency_ms,
+                            excluded_enemy_ids=reserved_prelock_ids,
+                        )
+                    else:
+                        prelock = raw_prelock
+                        last_prelock_conflict_key = None
+
+                    prelock_conflict = (
+                        self.executor.prelock_reservation_conflict(
+                            prelock, state)
+                        if prelock is not None
+                        else False
+                    )
+
+                    prelock_key = (
+                        (
+                            int(prelock['enemy_id']),
+                            str(prelock['state']),
+                        )
+                        if prelock is not None
+                        else None
+                    )
+
+                    if prelock is None:
+                        last_prelock_fast_key = None
+                        last_prelock_diag_key = None
+
+                    prelock_fast_path = bool(
+                        prelock is not None
+                        and not prelock_conflict
+                        and prelock_key != last_prelock_fast_key
+                        and not paused
+                        and pending_model is None
+                        and not model_warmup_pending
+                        and not self.executor.pending
+                        and self.executor.future is None
+                    )
+
+                    if prelock_fast_path:
+                        prelock_fast_path = (
+                            self.executor.interrupt_post_action_recheck(
+                                prelock, state)
+                        )
+
+                    if prelock is not None:
+                        diag_key = (
+                            int(prelock['enemy_id']),
+                            str(prelock['state']),
+                            str(prelock['reason']),
+                            bool(prelock_conflict),
+                        )
+
+                        if diag_key != last_prelock_diag_key:
+                            self.log(
+                                'prelock_threat',
+                                tick=state.tick,
+                                prelock_state=prelock['state'],
+                                reason=prelock['reason'],
+                                enemy_id=prelock['enemy_id'],
+                                enemy_card_id=prelock[
+                                    'enemy_card_id'],
+                                tower_id=prelock['tower_id'],
+                                lane=prelock['lane'],
+                                distance=round(
+                                    prelock['distance'], 1),
+                                distance_to_lock=round(
+                                    prelock['distance_to_lock'], 1),
+                                attack_range=(
+                                    round(prelock['attack_range'], 1)
+                                    if prelock[
+                                        'attack_range'] is not None
+                                    else None
+                                ),
+                                closing_speed_per_tick=round(
+                                    prelock[
+                                        'closing_speed_per_tick'], 2),
+                                lock_eta_ms=round(
+                                    prelock['lock_eta_ms'], 1),
+                                latest_safe_response_ms=round(
+                                    prelock[
+                                        'latest_safe_response_ms'], 1),
+                                reservation_conflict=prelock_conflict,
+                                fast_path=prelock_fast_path,
+                            )
+
+                            last_prelock_diag_key = diag_key
+
+                    normal_policy_due = (
+                        state.tick
+                        >= last_decision_tick
+                        + config.DECISION_TICKS
+                    )
+
+                    policy_due = (
+                        normal_policy_due
+                        or prelock_fast_path
+                    )
                     self._last_simulation_forecast = None
                     mirror = getattr(self, 'mirror', None)
                     if mirror is not None and mirror.active:
@@ -611,7 +784,7 @@ class CustomCardDeployAgent:
                         if (mirror.active and not paused and pending_model is None
                                 and not self.executor.pending and self.executor.future is None
                                 and state.tick >= FIRST_POLICY_DECISION_TICK
-                                and state.tick >= last_decision_tick + config.DECISION_TICKS
+                                and policy_due
                                 and not self.executor.decision_blocked(state)):
                             # Use the same time basis as pending virtual-card
                             # predictions: measured end-to-end input latency
@@ -711,7 +884,7 @@ class CustomCardDeployAgent:
                     # while policy may react with another legal slot on a
                     # fresh authoritative frame.
                     if (state.tick >= FIRST_POLICY_DECISION_TICK
-                            and state.tick >= last_decision_tick + config.DECISION_TICKS
+                            and policy_due
                             and not self.executor.pending
                             and self.executor.future is None
                             and not self.executor.decision_blocked(state)):
@@ -777,6 +950,8 @@ class CustomCardDeployAgent:
                                 legal_candidates=int(batch.candidates.mask.sum()))
                         wait_since = (state.tick if wait_since is None else wait_since) if waiting else None
                         last_decision_tick = state.tick
+                        if prelock_fast_path:
+                            last_prelock_fast_key = prelock_key
                         # After any card consume (or an ambiguous touch), use
                         # a settled frame as a no-write preview.  A follow-up
                         # card is sent only if it remains the same highest
