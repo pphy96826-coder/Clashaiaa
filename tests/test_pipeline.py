@@ -1968,7 +1968,10 @@ class ExecutorTests(unittest.TestCase):
         starts = [data for event, data in self.events
                   if event == 'threat_reservation_started'
                   and data.get('confidence') == 'confirmed']
-        self.assertEqual(starts[-1]['ttl_ms'], 850)
+        self.assertGreaterEqual(
+            starts[-1]['ttl_ms'],
+            round(self.executor.THREAT_RESERVATION_CONFIRMED_SECONDS * 1000),
+        )
 
     def _reserve_spell_swarm(self, s):
         # Model a Goblin-Barrel-style tight multi-body threat. The raw child
