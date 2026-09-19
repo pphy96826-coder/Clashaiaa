@@ -143,9 +143,10 @@ UNCERTAIN_PREDICTION_SECONDS = 1.4
 # from authorizing a second card that the game can no longer afford.
 ELIXIR_RESERVATION_SECONDS = 1.25
 # Weak positive ACKs (spawn or elixir before native hand rotation) keep the
-# exact stale slot quarantined until authoritative hand rotation.  This value
-# only bounds the extra *virtual spend* protection and marks a telemetry-stale
-# guard for diagnostics; it does not reopen a still-stale slot.
+# exact stale slot quarantined until either the native hand rotates or the
+# exact native cycle plus the other three hand slots uniquely prove the
+# replacement card. This value only bounds the extra *virtual spend*
+# protection; timeout alone never reopens a stale slot.
 # The quarantine is slot-local, so the other three cards continue normally.
 SLOT_CONSUME_GUARD_MAX_SECONDS = 3.0
 ACTION_MAX_LATENESS_SECONDS = 0.8
