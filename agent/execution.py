@@ -479,7 +479,6 @@ class ActionExecutor:
                     world=None if skill else action_world(action))
             else:
                 self.pending.append(pending)
-                self.attempted_actions += 1
                 self.log('action_queued', action=action.to_dict(), decision_tick=state.tick,
                          command_seq=pending.command_seq)
                 # Touch selection and placement share one UI transaction.
@@ -744,6 +743,10 @@ class ActionExecutor:
                 self.log('action_expired', card=action.card_id, decision_tick=pending.decision_tick)
                 break
             pending.state = 'sent'
+            # Count only real Android input attempts. Queued actions rejected
+            # by live revalidation or expiry never touched the device and must
+            # not consume --max-actions.
+            self.attempted_actions += 1
             pending.sent_at = now
             pending.sent_tick = state.tick
             pending.prior_elixir = float(state.elixir)
