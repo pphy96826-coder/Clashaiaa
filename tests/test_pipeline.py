@@ -343,13 +343,14 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.kinds['wait'])
         self.assertTrue(o.action_mask.hand_slots[0])  # Skeletons stay available.
         self.assertFalse(o.action_mask.hand_slots[1])  # Musketeer held.
-        self.assertFalse(o.action_mask.hand_slots[3])  # Hog held.
+        self.assertFalse(o.action_mask.hand_slots[2])  # Hog held.
+        self.assertTrue(o.action_mask.hand_slots[3])  # Ice Spirit stays available.
         self.assertEqual(
             o.action_mask.reasons['slot_reasons']['1'],
             'strategy_neutral_patience',
         )
         self.assertEqual(
-            o.action_mask.reasons['slot_reasons']['3'],
+            o.action_mask.reasons['slot_reasons']['2'],
             'strategy_neutral_patience',
         )
 
