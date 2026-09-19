@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import unittest
 
-import test_ability_state
+from tests import test_ability_state
 from agent.execution import ActionExecutor
 from bridge.probe_client import ProbeClient
 from bridge.hero_execution import ABILITY, ability_button, ensure_ability_calibration
@@ -129,7 +129,7 @@ class HeroExecutionTests(unittest.TestCase):
         self.assertFalse(agent._validate_action(action, self.state))
 
     def test_skill_and_card_share_elixir_and_keep_input_types_separate(self):
-        from test_pipeline import play
+        from tests.test_pipeline import play
         self.state.elixir = 3
         self.executor.submit(SimpleNamespace(actions=(self.action, play())), self.state)
         self.assertEqual(len(self.executor.pending), 1)
@@ -137,7 +137,7 @@ class HeroExecutionTests(unittest.TestCase):
 
     def test_hero_spawn_ack_joins_variant_id_through_native_controller(self):
         from dataclasses import replace
-        from test_pipeline import play
+        from tests.test_pipeline import play
         action = replace(play(slot=1, card=26000014),
             metadata={'policy_effective_cost':4., 'policy_effective_form_code':2})
         self.executor.submit(SimpleNamespace(actions=(action,)), self.state)
@@ -162,7 +162,7 @@ class HeroExecutionTests(unittest.TestCase):
 
     def test_actuator_does_not_tap_a_card_into_skill_button(self):
         from bridge.actuator import Actuator
-        from test_pipeline import play
+        from tests.test_pipeline import play
         actuator = Actuator(guard_hero_hud=True)
         actuator.size = (1080, 1920)
         actuator._command = Mock()
