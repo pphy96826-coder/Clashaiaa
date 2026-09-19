@@ -120,11 +120,12 @@
   "tools/capture_native.py": "ab9ec2f345a87642af18fdd032ad8380119c5ed4624efe1195343d424de1bd48",
   "tools/compare_observation_profiles.py": "739fad7d34a0bedf146d5fa5cdbb764fdd26397bb083488361fb02c960005033",
   "tools/coordinate_view.py": "7654132a919fa1958904f2df106f52da3ed588abf3109cf0b198afd420775c79",
-  "tools/inspect_players.py": "884ba9690a7330f8852a7790b821108f35d5cd28a3cca56ccce4f36febc61d1c",
+  "tools/inspect_players.py": "6dbcf0972ba5dcf4fb83625176e4f00882f9ee5e700a02ef60a7bd319ed3fe53",
   "tools/install_probe.py": "a99d5de7b4ea1ce0c02cd2bc016c11139294c1599edca73090005ae41f27c91a",
   "tools/launch_menu.py": "524f40e775cb64c84c3aa60df066b43b1bd453b3d69d8ced1894714a177680bd",
   "tools/package_release.py": "c6c6fae0806ea1f8f7ecd9aa4fd218f4c9586c7ef70a7edc540416876926305e",
   "tools/preflight.py": "7fc93853832bc35948c3f4631cb6a1dc13ffad3a2fd3ee7f60e2376ceafb8132",
   "upstream.lock.json": "e959e38e60076d95f56bd86d901faf3480ca55cd4624a8b3687807f7588536d4",
-  "bridge/adb_runtime.py": "962a1859569ea58ebc81aa1b6c3e3466c1b662a12a761711ec546e880625342f"
+  "bridge/adb_runtime.py": "962a1859569ea58ebc81aa1b6c3e3466c1b662a12a761711ec546e880625342f",
+  "tests/test_inspect_players.py": "fb35d7c72fad1a6bc5d6964df8bcdc69896141c9be89ec3cdaf0b370b4550092"
 }
