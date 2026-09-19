@@ -308,6 +308,11 @@ class ActionExecutor:
             self.log('action_cancelled' if pending.state == 'queued' else 'action_unresolved_at_terminal',
                      reason='battle_finalized', card=pending.action.card_id,
                      decision_tick=pending.decision_tick, status=pending.state)
+        for pending in self.ack_watch:
+            self.log('action_unresolved_at_terminal',
+                     reason='battle_finalized', card=pending.action.card_id,
+                     decision_tick=pending.decision_tick, status='ack_watch',
+                     command_seq=pending.command_seq)
         self.reset()
 
     def blocked_slots(self, state):
@@ -510,7 +515,22 @@ class ActionExecutor:
                 # ACK timing here rather than at thread submission.  This
                 # prevents a slow but still-live touch from being mislabeled
                 # UNKNOWN halfway through its own input transaction.
-                self.active.sent_at = completed_at
+                completed = self.active
+                completed.sent_at = completed_at
+                if completed in self.pending:
+                    self.pending.remove(completed)
+                if completed not in self.ack_watch:
+                    self.ack_watch.append(completed)
+                if (state is not None
+                        and completed.action.kind.value == 'play_card'):
+                    self._commit_threat_reservation(
+                        completed, state, completed_at, confidence='provisional')
+                self._fresh_state_required = True
+                self.log('ack_watch_started',
+                         command_seq=completed.command_seq,
+                         card=completed.action.card_id,
+                         slot=completed.action.hand_slot,
+                         watches=len(self.ack_watch))
             except Exception as exc:
                 self.fault = str(exc)
                 self.pending.clear()
@@ -528,6 +548,11 @@ class ActionExecutor:
             self.end_battle()
             return
         for pending in list(self.pending):
+            if pending.state == 'sent' and self.future is None:
+                self.pending.remove(pending)
+                if pending not in self.ack_watch:
+                    self.ack_watch.append(pending)
+        for pending in list(self.ack_watch):
             action = pending.action
             skill = action.kind.value == 'activate_ability'
             if pending.state == 'sent':
