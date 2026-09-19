@@ -588,6 +588,143 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(
             musk['heavy_defense_musketeer_max_defensive_depth'], 9500.0)
 
+    def test_heavy_defense_stages_ice_golem_and_cheap_control(self):
+        raw = opening()
+        hand = (26000038, 26000010, 26000030, 28000000)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-defense-cheap-control')
+        s.elixir = 10.0
+
+        add_enemy(s, 9204, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        # A right-lane distractor starts defense while the heavy core is still
+        # far away. Ice Golem stays reserved for the tank; Skeletons/Spirit may
+        # still answer the immediate distractor.
+        giant = next(ent for ent in s.entities if ent['id'] == 9204)
+        giant['y'] = 24000
+        add_enemy(s, 9205, 14500, 10000, card_id=26000010, hp=100)
+        s.tick += 1
+        _, far = a.tensorize(s)
+
+        self.assertEqual(far.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertFalse(far.action_mask.hand_slots[0])
+        self.assertEqual(
+            far.action_mask.reasons['slot_reasons']['0'],
+            'strategy_hold_ice_golem_for_heavy_core',
+        )
+        self.assertTrue(far.action_mask.reasons['heavy_defend_ice_golem_held'])
+        self.assertEqual(
+            far.action_mask.placement_masks['1']['defensive_threat_lane'],
+            'right',
+        )
+        self.assertEqual(
+            far.action_mask.placement_masks['2']['defensive_threat_lane'],
+            'right',
+        )
+
+        # Once the heavy core itself reaches our half, Ice Golem and cheap
+        # control become same-lane engagement tools with bounded depth.
+        distractor = next(ent for ent in s.entities if ent['id'] == 9205)
+        distractor['hp'] = 0
+        giant['y'] = 12000
+        s.tick += 1
+        _, near = a.tensorize(s)
+
+        self.assertTrue(near.action_mask.hand_slots[0])
+        self.assertFalse(
+            near.action_mask.reasons['heavy_defend_ice_golem_held'])
+        ice_golem = near.action_mask.placement_masks['0']
+        self.assertEqual(ice_golem['heavy_defense_lane'], 'left')
+        self.assertEqual(
+            ice_golem['heavy_defense_ice_golem_min_defensive_depth'], 5000.0)
+        self.assertEqual(
+            ice_golem['heavy_defense_ice_golem_max_defensive_depth'], 12500.0)
+
+        for slot in ('1', '2'):
+            cheap = near.action_mask.placement_masks[slot]
+            self.assertEqual(cheap['heavy_defense_lane'], 'left')
+            self.assertEqual(
+                cheap['heavy_defense_cheap_min_defensive_depth'], 5500.0)
+            self.assertEqual(
+                cheap['heavy_defense_cheap_max_defensive_depth'], 14000.0)
+
+    def test_heavy_defense_fireball_waits_for_visible_support_value(self):
+        raw = opening()
+        hand = (28000000, 26000014, 27000000, 26000038)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-defense-fireball')
+        s.elixir = 10.0
+
+        add_enemy(s, 9206, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9206)
+        giant['y'] = 9000
+        s.tick += 1
+        _, lone = a.tensorize(s)
+
+        # A lone tank is not sufficient Fireball value.
+        self.assertFalse(lone.action_mask.hand_slots[0])
+        self.assertEqual(
+            lone.action_mask.reasons['slot_reasons']['0'],
+            'strategy_hold_fireball_for_heavy_support',
+        )
+        self.assertFalse(
+            lone.action_mask.reasons['heavy_defend_fireball_released'])
+        self.assertEqual(
+            lone.action_mask.reasons['heavy_defend_fireball_support_cost'],
+            0.0,
+        )
+
+        # Visible Musketeer support next to the tank crosses the value gate.
+        add_enemy(s, 9207, 4500, 10000, card_id=26000014, hp=700)
+        s.tick += 1
+        _, supported = a.tensorize(s)
+
+        self.assertTrue(supported.action_mask.hand_slots[0])
+        self.assertTrue(
+            supported.action_mask.reasons['heavy_defend_fireball_released'])
+        self.assertEqual(
+            supported.action_mask.reasons['heavy_defend_fireball_support_count'],
+            1,
+        )
+        self.assertGreaterEqual(
+            supported.action_mask.reasons['heavy_defend_fireball_support_cost'],
+            3.0,
+        )
+        fireball = supported.action_mask.placement_masks['0']
+        self.assertEqual(
+            fireball['heavy_defense_fireball_target_radius'], 5500.0)
+        self.assertEqual(
+            fireball['heavy_defense_fireball_target_x'], 3500.0)
+        self.assertEqual(
+            fireball['heavy_defense_fireball_target_y'], 9000.0)
+        for y, row in enumerate(fireball['row_major']):
+            for x, allowed in enumerate(row):
+                if allowed:
+                    self.assertLessEqual(
+                        ((x + 0.5) * 1000.0 - 3500.0) ** 2
+                        + ((y + 0.5) * 1000.0 - 9000.0) ** 2,
+                        5500.0 ** 2,
+                    )
+
     def test_incoming_push_suppresses_stale_counterpush_bias(self):
         a, s = self.adapter()
         s.elixir = 9.0
