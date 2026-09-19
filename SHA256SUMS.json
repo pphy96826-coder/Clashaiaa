@@ -108,7 +108,7 @@
   "tests/test_pipeline.py": "0d9437c944fb71253d959b43894abeef30c23cb657a813d0754d6a91de48e54d",
   "tests/test_profile_comparison.py": "38f7db174e60c659abdff3600d96fb5a6062b1fe92527faac1106c30c9812f72",
   "tests/test_projectile_origin.py": "794d037320ac532cf0c384348fada15c81a4991072cf830bc676ffdbd7b45940",
-  "tests/test_reconnect_lifecycle.py": "03999eddd2d2f9de5ccf12b37d97d6a4335f1cbf00fbac6555d454f0afbafdfe",
+  "tests/test_reconnect_lifecycle.py": "99bf13a982c89b6a4f3fac08aa6d35e81c668b5b7b07cdb533c0b5a462401f8a",
   "tests/test_recovery.py": "8f105b78d20503aa3a3df9bbac7f69d6ff6244e73de60e7d972f32a66a587fc6",
   "tests/test_reference_events.py": "24b168ed35b5819c3ed107ad417edf45564740ca87d35181b60b9d19a78de7ee",
   "tests/test_relations.py": "c3a90ddd74c3a6c6129c08ac3651f006404eca21565be6f8fea48743b42cede5",
@@ -128,5 +128,6 @@
   "upstream.lock.json": "e959e38e60076d95f56bd86d901faf3480ca55cd4624a8b3687807f7588536d4",
   "bridge/adb_runtime.py": "962a1859569ea58ebc81aa1b6c3e3466c1b662a12a761711ec546e880625342f",
   "tests/test_inspect_players.py": "fb35d7c72fad1a6bc5d6964df8bcdc69896141c9be89ec3cdaf0b370b4550092",
-  "live_lifecycle.py": "bc15d7820b2cf9bf10e62b9ff77b679092fbcb33a11b0d8d90bf6c13eb119583"
+  "live_lifecycle.py": "bc15d7820b2cf9bf10e62b9ff77b679092fbcb33a11b0d8d90bf6c13eb119583",
+  "bridge/lifecycle_screen.py": "5a4f3e3422f6a4ba823f069b88bb3908f1efeeb1fe98c2949e6a4953709c1afa"
 }
