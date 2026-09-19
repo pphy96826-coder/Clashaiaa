@@ -270,6 +270,73 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(len(self.executor.pending),1)
         self.assertIn('in_flight_capacity', [d.get('reason') for e,d in self.events])
 
+    def test_completed_input_ack_watch_allows_different_slot(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+        pending.state = 'sent'
+        pending.sent_at = time.perf_counter()
+        pending.sent_tick = s.tick
+        pending.prior_elixir = s.elixir
+        self.executor.pending.remove(pending)
+        self.executor.ack_watch.append(pending)
+        self.executor.unconfirmed_spend.append(
+            (time.perf_counter(), pending.cost, pending.command_seq))
+
+        second = play(slot=1, card=s.hand_cards[1])
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertEqual(len(self.executor.ack_watch), 1)
+        self.assertEqual(len(self.executor.pending), 1)
+        self.assertEqual(self.executor.pending[0].action.hand_slot, 1)
+        self.assertIn(0, self.executor.blocked_slots(s))
+
+    def test_ack_watch_keeps_same_slot_blocked(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        pending.state = 'sent'
+        pending.sent_at = time.perf_counter()
+        pending.sent_tick = s.tick
+        pending.prior_elixir = s.elixir
+        self.executor.ack_watch.append(pending)
+
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+
+        self.assertFalse(self.executor.pending)
+        reasons = [data.get('reason') for event, data in self.events
+                   if event == 'action_rejected']
+        self.assertIn('slot_changed_or_locked', reasons)
+
+    def test_multiple_ack_watches_do_not_use_elixir_fallback(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        second = play(slot=1, card=s.hand_cards[1])
+        now = time.perf_counter()
+        for seq, action in ((1, first), (2, second)):
+            pending = type('P', (), {})()
+            pending.action = action
+            pending.command_seq = seq
+            pending.state = 'sent'
+            pending.sent_at = now
+            pending.sent_tick = s.tick
+            pending.prior_elixir = 10.0
+            pending.cost = 1.0
+            pending.decision_at = now
+            pending.threat_ids = frozenset()
+            pending.threat_target = None
+            pending.prior_evolution_progress = None
+            self.executor.ack_watch.append(pending)
+
+        s.tick += 1
+        s.elixir = 8.0
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(len(self.executor.ack_watch), 2)
+        self.assertNotIn('hand_ack', [event for event, _ in self.events])
+
     def test_third_action_is_rejected_at_in_flight_capacity(self):
         s=state()
         self.executor.submit(SimpleNamespace(actions=(play(), play(slot=1,card=26000014))),s)
