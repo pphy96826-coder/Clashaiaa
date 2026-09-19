@@ -186,6 +186,36 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(o.action_mask.reasons['slot_reasons']['1'], 'pending_or_cooldown')
         self.assertEqual(o.action_mask.reasons['slot_reasons']['2'], 'insufficient_elixir')
 
+    def test_single_lane_threat_masks_wrong_lane_before_policy(self):
+        a, s = self.adapter()
+        add_enemy(s, 9001, 3500, 11000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['defensive_threat_lane'], 'left')
+        defensive = o.action_mask.placement_masks['0']  # Skeletons
+        self.assertTrue(any(row[x] for row in defensive['row_major'] for x in range(0, 9)))
+        self.assertFalse(any(row[x] for row in defensive['row_major'] for x in range(9, 18)))
+
+        # Hog Rider is an offensive win condition and is intentionally not
+        # constrained by this conservative defensive-lane gate.
+        hog = o.action_mask.placement_masks['2']
+        self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
+
+    def test_split_lane_threat_does_not_mask_defensive_lane(self):
+        a, s = self.adapter()
+        add_enemy(s, 9001, 3500, 11000, card_id=26000021)
+        add_enemy(s, 9002, 14500, 11000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertIsNone(o.action_mask.reasons['defensive_threat_lane'])
+        defensive = o.action_mask.placement_masks['0']
+        self.assertTrue(any(row[x] for row in defensive['row_major'] for x in range(0, 9)))
+        self.assertTrue(any(row[x] for row in defensive['row_major'] for x in range(9, 18)))
+
     def test_missing_initial_towers_do_not_open_pockets(self):
         s = state()
         s.entities.pop()
