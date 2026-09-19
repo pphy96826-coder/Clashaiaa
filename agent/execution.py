@@ -1213,7 +1213,10 @@ class ActionExecutor:
                     # one-frame probe also lets a late hand/cycle transition
                     # win normally instead of being mistaken for a miss.
                     if (action.kind.value == 'play_card'
-                            and getattr(pending, 'retry_count', 0) < 1):
+                            and getattr(pending, 'retry_count', 0) < 1
+                            and len(self.ack_watch) == 1
+                            and (self.max_actions is None
+                                 or self.attempted_actions < self.max_actions)):
                         retry_probe_tick = int(
                             getattr(pending, 'retry_probe_tick', -1))
                         if retry_probe_tick < 0:
@@ -1243,7 +1246,13 @@ class ActionExecutor:
                             or current_cycle == getattr(
                                 pending, 'prior_cycle', None)
                         )
-                        if same_hand and same_cycle:
+                        no_cost_drop = (
+                            pending.prior_elixir is None
+                            or state.elixir is None
+                            or float(state.elixir) >
+                               float(pending.prior_elixir) - pending.cost + 0.15
+                        )
+                        if same_hand and same_cycle and no_cost_drop:
                             self.ack_watch.remove(pending)
                             pending.state = 'queued'
                             pending.retry_count += 1
