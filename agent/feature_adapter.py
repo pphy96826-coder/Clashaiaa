@@ -42,8 +42,11 @@ HOG_26_DECK = (26000010, 26000014, 26000021, 26000030, 26000038, 27000000, 28000
 HOG_RIDER = 26000021
 MINER = 26000032
 DEFENSIVE_LANE_CARDS = frozenset((26000010, 26000014, 26000030, 26000038, 27000000))
+COUNTERPUSH_SUPPORT_CARDS = frozenset((26000014, 203000014, 26000038))
 ATTACK_HOLD_TOWER_DISTANCE = 7000.0
 ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR = 8.0
+COUNTERPUSH_MIN_PROGRESS = 9000.0
+COUNTERPUSH_MAX_PROGRESS = 17000.0
 
 # Conservative impact envelopes in native world units.  They are deliberately
 # wider than the visual effect so a delayed spell cannot wake an inactive king
@@ -536,15 +539,8 @@ class FeatureAdapter:
                 return True
         return False
 
-    def _attack_hold_context(self, effective_elixir):
-        """Conservatively hold Hog when a live enemy is already near our tower.
-
-        This is a macro safety gate, not an attack recommender.  It only
-        suppresses the win condition when committing four elixir would leave
-        too little budget to answer an immediate near-tower threat.
-        """
-        if float(effective_elixir) >= ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR:
-            return None
+    def _near_tower_pressure(self):
+        """Return the nearest live enemy already pressuring one of our towers."""
         own_towers = [
             tower for tower in self._towers.values()
             if tower.owner == self.actor_owner and tower.hitpoints > 0
@@ -582,12 +578,74 @@ class FeatureAdapter:
 
         if best is None or best['distance'] > ATTACK_HOLD_TOWER_DISTANCE:
             return None
+        return best
+
+    def _attack_hold_context(self, effective_elixir, pressure=None):
+        """Conservatively hold Hog when a live enemy is already near our tower.
+
+        This is a macro safety gate, not an attack recommender.  It only
+        suppresses the win condition when committing four elixir would leave
+        too little budget to answer an immediate near-tower threat.
+        """
+        if float(effective_elixir) >= ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR:
+            return None
+        pressure = pressure if pressure is not None else self._near_tower_pressure()
+        if pressure is None:
+            return None
         return {
             'reason': 'near_tower_defense',
-            'distance': best['distance'],
-            'enemy_id': best['enemy_id'],
-            'tower_id': best['tower_id'],
+            'distance': pressure['distance'],
+            'enemy_id': pressure['enemy_id'],
+            'tower_id': pressure['tower_id'],
             'required_effective_elixir': ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR,
+        }
+
+    def _counterpush_context(self, pressure=None):
+        """Detect one unambiguous surviving support lane after defense.
+
+        This does not force Hog.  It only gives Hog's placement mask the lane
+        of a surviving Musketeer/Ice Golem that is already advancing toward
+        the bridge after near-tower pressure has cleared.
+        """
+        if pressure is not None:
+            return None
+        supports = []
+        for ent in self._live_entities.values():
+            if int(ent.get('owner', -1)) != self.actor_owner:
+                continue
+            card_id = int(ent.get('card_id', -1))
+            if card_id not in COUNTERPUSH_SUPPORT_CARDS:
+                continue
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+            x, y = probe_to_world(ent['x'], ent['y'])
+            progress = y if self.actor_owner == 0 else 32000.0 - y
+            if not (COUNTERPUSH_MIN_PROGRESS <= progress <= COUNTERPUSH_MAX_PROGRESS):
+                continue
+            lane = 'left' if x < 9000.0 else 'right'
+            max_hp = float(ent.get('max_hp') or 0.0)
+            hp_fraction = (float(hp) / max_hp) if hp is not None and max_hp > 0 else 1.0
+            supports.append({
+                'lane': lane,
+                'entity_id': int(ent['id']),
+                'card_id': card_id,
+                'progress': progress,
+                'hp_fraction': hp_fraction,
+            })
+
+        if not supports:
+            return None
+        lanes = {row['lane'] for row in supports}
+        if len(lanes) != 1:
+            return None
+        best = max(supports, key=lambda row: (row['progress'], row['hp_fraction']))
+        return {
+            'lane': best['lane'],
+            'support_entity_id': best['entity_id'],
+            'support_card_id': best['card_id'],
+            'support_progress': best['progress'],
+            'support_hp_fraction': best['hp_fraction'],
         }
 
     def _single_defensive_threat_lane(self):
@@ -615,17 +673,21 @@ class FeatureAdapter:
                 'enemy_count': len(enemy)}
 
     @staticmethod
-    def _mask_to_defensive_lane(entry, threat_lane):
-        """Remove cells the live validator would reject for wrong-lane defense."""
-        left = threat_lane == 'left'
+    def _mask_to_lane(entry, lane, metadata_key):
+        left = lane == 'left'
         rows = tuple(tuple(
             bool(allowed) and ((x < 9) if left else (x >= 9))
             for x, allowed in enumerate(row)
         ) for row in entry['row_major'])
         masked = dict(entry)
         masked['row_major'] = rows
-        masked['defensive_threat_lane'] = threat_lane
+        masked[metadata_key] = lane
         return masked
+
+    @classmethod
+    def _mask_to_defensive_lane(cls, entry, threat_lane):
+        """Remove cells the live validator would reject for wrong-lane defense."""
+        return cls._mask_to_lane(entry, threat_lane, 'defensive_threat_lane')
 
     def defensive_lane_conflict(self, action, state):
         """Detect an obvious cross-lane defensive placement mistake.
@@ -948,11 +1010,23 @@ class FeatureAdapter:
         defensive_lane_gate = self._single_defensive_threat_lane()
         self.quality['defensive_threat_lane'] = (
             defensive_lane_gate['threat_lane'] if defensive_lane_gate else None)
-        attack_hold = self._attack_hold_context(elixir)
+        near_tower_pressure = self._near_tower_pressure()
+        attack_hold = self._attack_hold_context(elixir, near_tower_pressure)
+        counterpush = self._counterpush_context(near_tower_pressure)
+        strategy_phase = (
+            'defend' if near_tower_pressure is not None else
+            'counterpush' if counterpush is not None else
+            'neutral'
+        )
+        self.quality['strategy_phase'] = strategy_phase
         self.quality['attack_hold_reason'] = (
             attack_hold['reason'] if attack_hold else None)
         self.quality['attack_hold_distance'] = (
             attack_hold['distance'] if attack_hold else None)
+        self.quality['counterpush_lane'] = (
+            counterpush['lane'] if counterpush else None)
+        self.quality['counterpush_support_entity_id'] = (
+            counterpush['support_entity_id'] if counterpush else None)
         for slot, cid in slots.items():
             spec = self.bundle.card_specs[cid]
             if selections is not None:
@@ -990,6 +1064,9 @@ class FeatureAdapter:
             if defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
                 entry = self._mask_to_defensive_lane(
                     entry, defensive_lane_gate['threat_lane'])
+            if cid == HOG_RIDER and counterpush is not None:
+                entry = self._mask_to_lane(
+                    entry, counterpush['lane'], 'counterpush_lane')
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
@@ -1017,7 +1094,14 @@ class FeatureAdapter:
                      'attack_hold_distance': (
                          attack_hold['distance'] if attack_hold else None),
                      'attack_hold_enemy_id': (
-                         attack_hold['enemy_id'] if attack_hold else None)})
+                         attack_hold['enemy_id'] if attack_hold else None),
+                     'strategy_phase': strategy_phase,
+                     'counterpush_lane': (
+                         counterpush['lane'] if counterpush else None),
+                     'counterpush_support_entity_id': (
+                         counterpush['support_entity_id'] if counterpush else None),
+                     'counterpush_support_card_id': (
+                         counterpush['support_card_id'] if counterpush else None)})
         crowns = {}
         for owner in (0, 1):
             enemy = [t for t in towers if t.owner != owner]
