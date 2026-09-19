@@ -388,18 +388,23 @@ class ActionExecutor:
         slot = pending.action.hand_slot
         if slot is None:
             return
+        soft_expires_at = float(now) + float(config.ELIXIR_RESERVATION_SECONDS)
+        hard_expires_at = float(now) + float(config.SLOT_CONSUME_GUARD_MAX_SECONDS)
         self.slot_consume_guards[int(slot)] = {
             'card_id': int(pending.action.card_id or 0),
             'command_seq': int(pending.command_seq),
             'evidence': str(evidence),
-            'expires_at': float(now) + float(config.ELIXIR_RESERVATION_SECONDS),
+            'soft_expires_at': soft_expires_at,
+            'hard_expires_at': hard_expires_at,
+            'extension_logged': False,
         }
         self.log('slot_consume_guard_started',
                  command_seq=pending.command_seq,
                  card=pending.action.card_id,
                  slot=slot,
                  evidence=evidence,
-                 ttl_ms=round(config.ELIXIR_RESERVATION_SECONDS * 1000))
+                 ttl_ms=round(config.ELIXIR_RESERVATION_SECONDS * 1000),
+                 max_ttl_ms=round(config.SLOT_CONSUME_GUARD_MAX_SECONDS * 1000))
 
     def _prune_slot_consume_guards(self, state, now=None):
         if state is None:
@@ -409,8 +414,30 @@ class ActionExecutor:
         for slot, guard in list(self.slot_consume_guards.items()):
             card_id = int(guard['card_id'])
             rotated = state.hand_cards[slot] != card_id
-            expired = now >= float(guard['expires_at'])
-            if not rotated and not expired:
+            soft_expired = now >= float(guard['soft_expires_at'])
+            hard_expired = now >= float(guard['hard_expires_at'])
+            if rotated:
+                del self.slot_consume_guards[slot]
+                self._clear_spend(int(guard['command_seq']))
+                self.log('slot_consume_guard_cleared',
+                         command_seq=guard['command_seq'],
+                         card=card_id,
+                         slot=slot,
+                         evidence=guard['evidence'],
+                         reason='hand_rotation')
+                continue
+            if not soft_expired:
+                continue
+            if not hard_expired:
+                if not guard.get('extension_logged'):
+                    guard['extension_logged'] = True
+                    self.log('slot_consume_guard_extended',
+                             command_seq=guard['command_seq'],
+                             card=card_id,
+                             slot=slot,
+                             evidence=guard['evidence'],
+                             remaining_ms=round(
+                                 max(0.0, float(guard['hard_expires_at']) - now) * 1000))
                 continue
             del self.slot_consume_guards[slot]
             self._clear_spend(int(guard['command_seq']))
@@ -419,7 +446,7 @@ class ActionExecutor:
                      card=card_id,
                      slot=slot,
                      evidence=guard['evidence'],
-                     reason='hand_rotation' if rotated else 'timeout')
+                     reason='stale_hand_timeout')
 
     def blocked_slots(self, state):
         blocked = {p.action.hand_slot for p in (*self.pending, *self.ack_watch, *self.spawn_watch)
