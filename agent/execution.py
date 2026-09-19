@@ -597,6 +597,19 @@ class ActionExecutor:
             if inferred is not None and inferred != card_id:
                 del self.slot_consume_guards[slot]
                 self._clear_spend(int(guard['command_seq']))
+                if inferred == raw_baseline_card:
+                    # The exact cycle partition now agrees with the unchanged
+                    # raw slot, so no overlay is required even though the
+                    # weak-ACK source card differed from that stale baseline.
+                    self.slot_hand_overrides.pop(slot, None)
+                    state.hand_cards[slot] = int(raw_baseline_card)
+                    self.log('slot_consume_guard_cleared',
+                             command_seq=guard['command_seq'],
+                             card=card_id,
+                             slot=slot,
+                             evidence=guard['evidence'],
+                             reason='native_cycle_reconciled')
+                    continue
                 if self._recover_slot_override(
                         state, slot, raw_baseline_card, guard['command_seq'],
                         replacement_card=inferred):
