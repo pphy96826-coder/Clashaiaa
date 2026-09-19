@@ -1100,6 +1100,18 @@ class FeatureAdapter:
         defensive_lane_gate = self._single_defensive_threat_lane()
         self.quality['defensive_threat_lane'] = (
             defensive_lane_gate['threat_lane'] if defensive_lane_gate else None)
+        opponent_elixir_bounds = None
+        tracker = getattr(self.tensorizer, 'tracker', None)
+        if tracker is not None and hasattr(tracker, 'elixir_bounds'):
+            try:
+                low, high = tracker.elixir_bounds[1 - self.actor_owner]
+                opponent_elixir_bounds = (float(low), float(high))
+            except (IndexError, KeyError, TypeError, ValueError):
+                opponent_elixir_bounds = None
+        self.quality['opponent_elixir_lower'] = (
+            opponent_elixir_bounds[0] if opponent_elixir_bounds else None)
+        self.quality['opponent_elixir_upper'] = (
+            opponent_elixir_bounds[1] if opponent_elixir_bounds else None)
         near_tower_pressure = self._near_tower_pressure()
         defensive_pressure = self._has_defensive_pressure()
         attack_hold = self._attack_hold_context(elixir, near_tower_pressure)
@@ -1220,7 +1232,11 @@ class FeatureAdapter:
                          building_attack_window['card_id'] if building_attack_window else None),
                      'attack_window_age_ticks': (
                          building_attack_window['age_ticks'] if building_attack_window else None),
-                     'active_enemy_building_count': len(self._active_enemy_buildings)})
+                     'active_enemy_building_count': len(self._active_enemy_buildings),
+                     'opponent_elixir_lower': (
+                         opponent_elixir_bounds[0] if opponent_elixir_bounds else None),
+                     'opponent_elixir_upper': (
+                         opponent_elixir_bounds[1] if opponent_elixir_bounds else None)})
         crowns = {}
         for owner in (0, 1):
             enemy = [t for t in towers if t.owner != owner]
