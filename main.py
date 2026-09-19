@@ -213,10 +213,15 @@ class CustomCardDeployAgent:
             console.start()
         self.actuator.prepare()
         if self.adapter.hero_mode is not False:
-            from bridge.hero_execution import ability_button
+            from bridge.hero_execution import ensure_ability_calibration
             try:
-                ability_button(config.ABILITY_CALIBRATION_PATH, self.actuator.size)
+                ability_point, generated = ensure_ability_calibration(
+                    config.ABILITY_CALIBRATION_PATH, self.actuator.size)
                 self.adapter.hero_skill_ready = True
+                self.log('ability_input_ready',
+                         screen=list(ability_point),
+                         calibration=str(config.ABILITY_CALIBRATION_PATH),
+                         generated=generated)
             except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError) as exc:
                 self.log('ability_input_disabled', reason=str(exc))
         if lifecycle is not None:
@@ -441,7 +446,7 @@ class CustomCardDeployAgent:
                                      matches=match_count)
                             break
                         try:
-                            lifecycle.start_battle()
+                            lifecycle.start_battle(ensure_lobby=False)
                         except LifecycleError as exc:
                             self.log('lifecycle_error', phase='next-battle', error=str(exc))
                             break
