@@ -266,16 +266,58 @@ class ExecutorTests(unittest.TestCase):
         s = state()
         self.executor.max_actions = 1
         self.executor.submit(SimpleNamespace(actions=(play(),)), s)
+        self.assertFalse(self.executor.action_budget_exhausted)
+        pending = self.executor.pending[0]
+        now = time.perf_counter()
+        pending.due = now - 0.01
+        pending.expires = now + 1.0
+        self.executor.poll(s, lambda *_: True)
         self.assertTrue(self.executor.action_budget_exhausted)
         self.assertFalse(self.executor.action_budget_settled)
 
-        pending = self.executor.pending.pop(0)
-        pending.state = 'sent'
+        # The worker is still the active serialized touch until completion.
+        self.executor.future = None
+        self.executor.active = None
+        if pending in self.executor.pending:
+            self.executor.pending.remove(pending)
         self.executor.ack_watch.append(pending)
         self.assertFalse(self.executor.action_budget_settled)
 
         self.executor.ack_watch.clear()
         self.assertTrue(self.executor.action_budget_settled)
+
+    def test_live_revalidation_rejection_does_not_consume_action_budget(self):
+        s = state()
+        self.executor.max_actions = 1
+        self.executor.submit(SimpleNamespace(actions=(play(),)), s)
+        pending = self.executor.pending[0]
+        now = time.perf_counter()
+        pending.due = now - 0.01
+        pending.expires = now + 1.0
+
+        self.executor.poll(s, lambda *_: False)
+
+        self.assertEqual(self.executor.attempted_actions, 0)
+        self.assertFalse(self.executor.action_budget_exhausted)
+        self.assertFalse(self.executor.pending)
+        reasons = [data.get('reason') for event, data in self.events
+                   if event == 'action_rejected']
+        self.assertIn('live_revalidation', reasons)
+
+    def test_input_started_consumes_action_budget(self):
+        s = state()
+        self.executor.max_actions = 1
+        self.executor.submit(SimpleNamespace(actions=(play(),)), s)
+        pending = self.executor.pending[0]
+        now = time.perf_counter()
+        pending.due = now - 0.01
+        pending.expires = now + 1.0
+
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(self.executor.attempted_actions, 1)
+        self.assertTrue(self.executor.action_budget_exhausted)
+        self.assertIn('input_started', [event for event, _ in self.events])
 
     def test_second_slot_waits_for_first_outcome(self):
         s=state()
