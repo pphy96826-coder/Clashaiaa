@@ -495,6 +495,34 @@ class AdapterTests(unittest.TestCase):
             'strategy_neutral_patience',
         )
 
+    def test_exact_building_cycle_window_stays_open_until_four_public_plays(self):
+        a, _ = self.adapter()
+        a._recent_enemy_building_expiry = {
+            'entity_id': 9501,
+            'card_id': 27000000,
+            'tick': 100,
+        }
+        a._opponent_last_play_count[27000000] = 7
+        a._opponent_exact_play_count = 9
+
+        window = a._exact_building_cycle_window()
+
+        self.assertEqual(window['reason'], 'enemy_building_out_of_cycle')
+        self.assertEqual(window['plays_since'], 2)
+        self.assertEqual(window['plays_until_return'], 2)
+
+        a._opponent_exact_play_count = 11
+        self.assertIsNone(a._exact_building_cycle_window())
+
+    def test_low_elixir_attack_window_requires_tight_public_bound(self):
+        open_window = FeatureAdapter._low_elixir_attack_window(
+            6.0, (3.25, 4.0), defensive_pressure=False)
+        self.assertEqual(open_window['reason'], 'opponent_low_elixir')
+        self.assertIsNone(FeatureAdapter._low_elixir_attack_window(
+            6.0, (1.0, 5.0), defensive_pressure=False))
+        self.assertIsNone(FeatureAdapter._low_elixir_attack_window(
+            6.0, (3.25, 4.0), defensive_pressure=True))
+
     def test_neutral_patience_releases_near_elixir_cap(self):
         a, s = self.adapter()
         s.elixir = 8.5
