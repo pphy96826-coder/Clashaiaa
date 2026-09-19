@@ -435,6 +435,66 @@ class AdapterTests(unittest.TestCase):
             'playable',
         )
 
+    def test_recent_enemy_building_expiry_opens_short_hog_window(self):
+        a, s = self.adapter()
+        s.elixir = 6.0
+        building_id = 9451
+        s.entities.append({
+            'id': building_id,
+            'owner': 1 - s.local_owner,
+            'card_id': 27000000,
+            'x': 9000,
+            'y': 22000,
+            'hp': 1000,
+            'max_hp': 1000,
+        })
+        s.tick += 1
+        _, active = a.tensorize(s)
+        self.assertFalse(active.action_mask.hand_slots[2])
+        self.assertIsNone(active.action_mask.reasons['attack_window_reason'])
+
+        s.entities[:] = [e for e in s.entities if e['id'] != building_id]
+        s.tick += 1
+        _, expired = a.tensorize(s)
+
+        self.assertEqual(expired.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertTrue(expired.action_mask.reasons['neutral_patience_active'])
+        self.assertEqual(
+            expired.action_mask.reasons['attack_window_reason'],
+            'recent_enemy_building_expired',
+        )
+        self.assertEqual(expired.action_mask.reasons['attack_window_card_id'], 27000000)
+        self.assertTrue(expired.action_mask.hand_slots[2])  # Hog is released.
+
+    def test_recent_building_attack_window_expires_back_into_patience(self):
+        a, s = self.adapter()
+        s.elixir = 6.0
+        building_id = 9452
+        s.entities.append({
+            'id': building_id,
+            'owner': 1 - s.local_owner,
+            'card_id': 27000000,
+            'x': 9000,
+            'y': 22000,
+            'hp': 1000,
+            'max_hp': 1000,
+        })
+        s.tick += 1
+        a.tensorize(s)
+        s.entities[:] = [e for e in s.entities if e['id'] != building_id]
+        s.tick += 1
+        a.tensorize(s)
+
+        s.tick += 51
+        _, o = a.tensorize(s)
+
+        self.assertIsNone(o.action_mask.reasons['attack_window_reason'])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_neutral_patience',
+        )
+
     def test_neutral_patience_releases_near_elixir_cap(self):
         a, s = self.adapter()
         s.elixir = 8.5
