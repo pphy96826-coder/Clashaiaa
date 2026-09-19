@@ -658,7 +658,7 @@ class ActionExecutor:
         if self.future is not None:
             # Never inspect hand/elixir timeout rules while the serial touch
             # transaction is still executing.  In particular, do not let the
-            # 350ms ACK window race a 500ms emulator input operation.
+            # the ACK budget race a slow emulator input operation.
             return
         if getattr(state, 'native_finalized', False) is True:
             self.end_battle()
@@ -899,7 +899,7 @@ class ActionExecutor:
                     # this exact card/target briefly; other cards remain
                     # available and the card itself is never disabled.
                     # A fresh frame is required below. Do not add a global
-                    # 350ms sleep after a missed ACK: it delays every other
+                    # global sleep after a missed ACK: it delays every other
                     # playable card even when the touch worker has finished.
                     # Slot, resource, and identical-action guards still apply.
                     self._recent_misses[self._action_key(action)] = now + 1.0
