@@ -941,8 +941,18 @@ class ActionExecutor:
                 if ack_timeout_seconds <= 0:
                     ack_timeout_seconds = self._card_ack_timeout_seconds()
                     pending.ack_timeout_seconds = ack_timeout_seconds
-                hand_changed = (state.tick > pending.sent_tick and
-                                state.hand_cards[action.hand_slot] != action.card_id)
+                raw_hand_card = self._raw_hand_card(
+                    state, action.hand_slot, action.owner)
+                hand_changed = (
+                    state.tick > pending.sent_tick
+                    and pending.prior_raw_hand_card is not None
+                    and raw_hand_card is not None
+                    and int(raw_hand_card) != int(pending.prior_raw_hand_card)
+                )
+                cycle_changed = (
+                    state.tick > pending.sent_tick
+                    and self._cycle_confirms_play(pending, state)
+                )
 
                 # Troops/buildings can provide a second, strictly positive ACK
                 # signal: a new own entity from the submitted source card that
@@ -1050,15 +1060,42 @@ class ActionExecutor:
                         and state.elixir is not None):
                     elixir_changed = (state.tick > pending.sent_tick and
                         float(state.elixir) <= float(pending.prior_elixir) - pending.cost + 0.15)
-                if hand_changed or elixir_changed or spawn_ack:
+                if hand_changed or cycle_changed or elixir_changed or spawn_ack:
                     self.ack_watch.remove(pending)
                     ack_evidence = (
                         'hand_rotation' if hand_changed else
+                        'native_cycle_transition' if cycle_changed else
                         'elixir_cost_drop' if elixir_changed else
                         spawn_ack_evidence or 'new_source_entity'
                     )
                     if hand_changed:
                         self._clear_spend(pending.command_seq)
+                    elif cycle_changed:
+                        # Exact own-cycle progression is authoritative card
+                        # consumption evidence. If the hand slot itself is
+                        # still stale, recover its effective replacement from
+                        # the pre-play next-card position instead of reopening
+                        # the stale source card.
+                        self._clear_spend(pending.command_seq)
+                        replacement = (
+                            int(pending.prior_cycle[0])
+                            if pending.prior_cycle else None
+                        )
+                        stale_raw = (
+                            int(pending.prior_raw_hand_card)
+                            if pending.prior_raw_hand_card is not None
+                            else int(action.card_id)
+                        )
+                        if replacement == stale_raw:
+                            self.slot_hand_overrides.pop(
+                                int(action.hand_slot), None)
+                            state.hand_cards[int(action.hand_slot)] = stale_raw
+                        else:
+                            self._recover_slot_override(
+                                state, action.hand_slot, stale_raw,
+                                pending.command_seq,
+                                replacement_card=replacement,
+                                evidence='native_cycle_transition')
                     else:
                         # Prevent the same stale native slot/card from being
                         # selected again on the very frame that supplied only
@@ -1221,6 +1258,12 @@ class ActionExecutor:
             pending.sent_at = now
             pending.sent_tick = state.tick
             pending.prior_elixir = float(state.elixir)
+            pending.prior_cycle = self._native_cycle(
+                state, action.owner) if not skill else None
+            pending.prior_raw_hand_card = (
+                self._raw_hand_card(state, action.hand_slot, action.owner)
+                if not skill else None
+            )
             self.unconfirmed_spend.append((now, pending.cost, pending.command_seq))
             prediction_lifetime = (config.PREDICTION_LATENCY_COMPENSATION_MS / 1000.0
                                    + config.PREDICTION_HORIZON_TICKS * config.TICK_SECONDS + 0.4)
