@@ -362,7 +362,21 @@ class AdapterTests(unittest.TestCase):
         raw = opening()
         enemy_owner = 1
         enemy = next(p for p in raw['players'] if p['owner'] == enemy_owner)
-        enemy['hand'][0]['card_id'] = 26000003
+
+        # Keep the fixture internally legal for FirstLight's public tracker:
+        # Giant really is in the opponent deck, starts in slot 0, and the
+        # replacement card comes from the visible native cycle after the play.
+        enemy_deck = [
+            26000003, 26000014, 26000021, 26000030,
+            26000038, 27000000, 28000000, 28000011,
+        ]
+        enemy['deck'] = list(enemy_deck)
+        enemy['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(enemy_deck[:4])
+        ]
+        enemy['cycle'] = list(enemy_deck[4:])
+
         s = ProbeClient(account_id=123).parse(raw)
         a = FeatureAdapter()
         a.reset_match(s, 'incoming-push-runtime-carrier')
@@ -373,7 +387,8 @@ class AdapterTests(unittest.TestCase):
         # that exact heavy play and enter preparation immediately.
         enemy_live = next(
             p for p in s.raw['players'] if int(p['owner']) == enemy_owner)
-        enemy_live['hand'][0]['card_id'] = 26000010
+        enemy_live['hand'][0]['card_id'] = 26000038
+        enemy_live['cycle'] = [27000000, 28000000, 28000011, 26000003]
         add_enemy(s, 9196, 3500, 26000, card_id=203000003, hp=3000)
         s.tick += 1
 
