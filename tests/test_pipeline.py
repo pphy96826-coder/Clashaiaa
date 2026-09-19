@@ -353,6 +353,43 @@ class ExecutorTests(unittest.TestCase):
         events = [event for event, _ in self.events]
         self.assertIn('ack_watch_started', events)
 
+    def test_new_source_entity_confirms_troop_without_hand_rotation(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = time.perf_counter() - 0.15
+        pending.input_completed_at = time.perf_counter() - 0.10
+        pending.prior_elixir = s.elixir
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        self.executor.ack_watch.append(pending)
+
+        # Hand/elixir still look stale, but a brand-new own entity from the
+        # exact source card is positive evidence that the deployment landed.
+        new_id = 9009
+        s.entities.append({
+            'id': new_id,
+            'owner': s.local_owner,
+            'card_id': first.card_id,
+            'x': 3500,
+            'y': 10500,
+            'hp': 100,
+            'max_hp': 100,
+        })
+        s.tick += 1
+        s.received_at = pending.input_completed_at + 0.01
+
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(len(acks), 1)
+        self.assertEqual(acks[0]['evidence'], 'new_source_entity')
+        self.assertEqual(acks[0]['spawn_entity_id'], new_id)
+        self.assertGreaterEqual(acks[0]['latency_ms'], 0)
+
     def test_ack_watch_requires_post_input_probe_frame(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
