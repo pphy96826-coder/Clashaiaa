@@ -51,7 +51,9 @@ class ActionExecutor:
     # tied to one concrete live enemy.  A short reservation suppresses another
     # card aimed at that same enemy while allowing immediate reactions to a
     # different threat.
-    THREAT_RESERVATION_SECONDS = 0.45
+    THREAT_RESERVATION_PROVISIONAL_SECONDS = 0.55
+    THREAT_RESERVATION_CONFIRMED_SECONDS = 0.85
+    THREAT_RESERVATION_UNCERTAIN_SECONDS = 0.70
     THREAT_RESERVATION_RADIUS_WORLD = 6000.0
 
     def __init__(self, actuator, log, dry_run=False, on_ability_ack=None, max_actions=None):
@@ -292,13 +294,18 @@ class ActionExecutor:
         threat_ids = frozenset(pending.threat_ids & live_ids)
         if not threat_ids:
             return False
+        ttl = {
+            'provisional': self.THREAT_RESERVATION_PROVISIONAL_SECONDS,
+            'confirmed': self.THREAT_RESERVATION_CONFIRMED_SECONDS,
+            'uncertain': self.THREAT_RESERVATION_UNCERTAIN_SECONDS,
+        }.get(confidence, self.THREAT_RESERVATION_CONFIRMED_SECONDS)
         reservation = ThreatReservation(
             command_seq=pending.command_seq,
             owner=int(pending.action.owner),
             card_id=int(pending.action.card_id or 0),
             threat_ids=threat_ids,
             target=pending.threat_target,
-            expires_at=now + self.THREAT_RESERVATION_SECONDS,
+            expires_at=now + ttl,
             confidence=confidence,
         )
         self.threat_reservations[:] = [
@@ -312,7 +319,7 @@ class ActionExecutor:
                  threat_ids=sorted(threat_ids),
                  target_world=list(pending.threat_target),
                  confidence=confidence,
-                 ttl_ms=round(self.THREAT_RESERVATION_SECONDS * 1000))
+                 ttl_ms=round(ttl * 1000))
         return True
 
     def pause(self):
