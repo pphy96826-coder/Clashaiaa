@@ -1246,8 +1246,23 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(recovered[-1]['replacement_card'], prior_cycle[0])
         self.assertFalse(recovered[-1]['slot_remains_blocked'])
 
-    def test_card_ack_timeout_starts_at_live_safe_floor(self):
+    def test_card_ack_timeout_uses_max_window_during_cold_start(self):
+        self.executor.end_to_end_latency_ms = 100.0
+
         self.executor._ack_latency_samples_ms.clear()
+        self.assertEqual(
+            self.executor._card_ack_timeout_seconds(),
+            config.CARD_ACK_TIMEOUT_MAX_SECONDS,
+        )
+
+        self.executor._ack_latency_samples_ms[:] = [420.0, 510.0]
+        self.assertEqual(
+            self.executor._card_ack_timeout_seconds(),
+            config.CARD_ACK_TIMEOUT_MAX_SECONDS,
+        )
+
+    def test_card_ack_timeout_returns_to_adaptive_floor_after_bootstrap(self):
+        self.executor._ack_latency_samples_ms[:] = [420.0, 510.0, 620.0]
         self.executor.end_to_end_latency_ms = 100.0
 
         timeout = self.executor._card_ack_timeout_seconds()
