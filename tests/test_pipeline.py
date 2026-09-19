@@ -353,6 +353,36 @@ class ExecutorTests(unittest.TestCase):
         events = [event for event, _ in self.events]
         self.assertIn('ack_watch_started', events)
 
+    def test_ack_watch_requires_post_input_probe_frame(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        pending.state = 'sent'
+        pending.sent_tick = s.tick - 1
+        pending.sent_at = time.perf_counter() - 0.2
+        pending.input_completed_at = time.perf_counter() - 0.1
+        pending.prior_elixir = s.elixir
+        self.executor.ack_watch.append(pending)
+
+        # This snapshot appears to show the card consumed, but it predates
+        # input completion and therefore must not be used as ACK evidence.
+        s.tick += 1
+        s.hand_cards[0] = 0
+        s.received_at = pending.input_completed_at - 0.01
+        self.executor.poll(s, lambda *_: True)
+        self.assertEqual(self.executor.ack_watch, [pending])
+        self.assertNotIn('hand_ack', [event for event, _ in self.events])
+
+        # A fresh frame captured after completion may confirm it.
+        s.received_at = pending.input_completed_at + 0.01
+        self.executor.poll(s, lambda *_: True)
+        self.assertFalse(self.executor.ack_watch)
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(len(acks), 1)
+        self.assertGreaterEqual(acks[0]['latency_ms'], 0)
+        self.assertGreaterEqual(acks[0]['input_to_ack_ms'], 0)
+
     def test_completed_input_ack_watch_allows_different_slot(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
