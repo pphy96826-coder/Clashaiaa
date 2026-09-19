@@ -1912,6 +1912,9 @@ class ExecutorTests(unittest.TestCase):
         )
         pending.sent_tick = s.tick
         pending.prior_elixir = s.elixir
+        # This test exercises the legacy fallback after the one-shot retry
+        # has already been consumed.
+        pending.retry_count = 1
         s.tick += 1
         self.executor.poll(s, lambda *_: True)
         self.assertFalse(self.executor.pending)
@@ -1937,6 +1940,9 @@ class ExecutorTests(unittest.TestCase):
         )
         pending.sent_tick = s.tick
         pending.prior_elixir = s.elixir
+        # This test exercises the legacy fallback after the one-shot retry
+        # has already been consumed.
+        pending.retry_count = 1
         self.executor.predictions.append({
             'action': first,
             'command_seq': pending.command_seq,
@@ -1963,6 +1969,9 @@ class ExecutorTests(unittest.TestCase):
         )
         pending.sent_tick = s.tick
         pending.prior_elixir = s.elixir
+        # This test exercises the legacy fallback after the one-shot retry
+        # has already been consumed.
+        pending.retry_count = 1
         s.tick += 1
         with patch.object(config, 'ENABLE_MODEL_PREDICTION_OVERLAY', False):
             self.executor.poll(s, lambda *_: True)
