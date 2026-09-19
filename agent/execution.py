@@ -510,13 +510,22 @@ class ActionExecutor:
             baseline_count, baseline_hp = self._threat_metrics(
                 state, threat_ids)
 
+        # Keep the bookkeeping row alive long enough to perform the
+        # residual-threat recheck after both the reaction hold and the short
+        # mostly-handled grace.  Suppression itself is still bounded by those
+        # two clocks; this only prevents expiry from silently bypassing the
+        # explicit recheck/release path at the exact boundary.
+        expires_at = max(
+            now + ttl,
+            suppress_until + self.THREAT_MOSTLY_HANDLED_GRACE_SECONDS + 0.05,
+        )
         reservation = ThreatReservation(
             command_seq=pending.command_seq,
             owner=int(pending.action.owner),
             card_id=int(pending.action.card_id or 0),
             threat_ids=threat_ids,
             target=pending.threat_target,
-            expires_at=now + ttl,
+            expires_at=expires_at,
             confidence=confidence,
             reaction_started_at=reaction_started_at,
             suppress_until=suppress_until,
@@ -534,7 +543,7 @@ class ActionExecutor:
                  threat_ids=sorted(threat_ids),
                  target_world=list(pending.threat_target),
                  confidence=confidence,
-                 ttl_ms=round(ttl * 1000),
+                 ttl_ms=round((expires_at - now) * 1000),
                  suppress_ms=max(
                      0, round((suppress_until - now) * 1000)),
                  baseline_count=baseline_count,
