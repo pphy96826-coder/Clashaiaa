@@ -262,6 +262,21 @@ class ExecutorTests(unittest.TestCase):
         self.assertFalse(self.executor.pending)
         self.actuator.deploy_action.assert_not_called()
 
+    def test_action_budget_waits_for_background_ack_to_settle(self):
+        s = state()
+        self.executor.max_actions = 1
+        self.executor.submit(SimpleNamespace(actions=(play(),)), s)
+        self.assertTrue(self.executor.action_budget_exhausted)
+        self.assertFalse(self.executor.action_budget_settled)
+
+        pending = self.executor.pending.pop(0)
+        pending.state = 'sent'
+        self.executor.ack_watch.append(pending)
+        self.assertFalse(self.executor.action_budget_settled)
+
+        self.executor.ack_watch.clear()
+        self.assertTrue(self.executor.action_budget_settled)
+
     def test_second_slot_waits_for_first_outcome(self):
         s=state()
         self.executor.submit(SimpleNamespace(actions=(play(),play(slot=1,card=26000014,delay=4))),s)
