@@ -2068,6 +2068,24 @@ class ExecutorTests(unittest.TestCase):
         ]
         self.assertTrue(suppressed)
 
+        # The survivor is not hard-blocked forever. If it is still present
+        # after the bounded finishing grace and the fresh policy still wants
+        # another answer, allow it.
+        with patch(
+                'agent.execution.time.perf_counter',
+                return_value=(
+                    reservation.suppress_until
+                    + self.executor.THREAT_MOSTLY_HANDLED_GRACE_SECONDS
+                    + 0.01)):
+            self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertEqual(len(self.executor.pending), 1)
+        releases = [
+            data for event, data in self.events
+            if event == 'threat_reservation_recheck_released'
+        ]
+        self.assertTrue(releases)
+        self.assertEqual(releases[-1]['reason'], 'residual_grace_elapsed')
+
     def test_swarm_reservation_does_not_absorb_different_push_unit(self):
         s = state()
         self._reserve_spell_swarm(s)
