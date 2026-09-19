@@ -1230,6 +1230,63 @@ class ExecutorTests(unittest.TestCase):
         self.assertNotIn(0, self.executor.blocked_slots(s))
         self.assertFalse(self.executor.slot_consume_guards)
 
+    def test_slot_consume_guard_extends_past_soft_ttl_while_hand_is_stale(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = now - 0.2
+        pending.sent_tick = s.tick
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq)
+        )
+        self.executor._start_slot_consume_guard(
+            pending, now - config.ELIXIR_RESERVATION_SECONDS - 0.1,
+            'new_source_entity',
+        )
+        guard = self.executor.slot_consume_guards[0]
+        guard['hard_expires_at'] = now + 1.0
+
+        self.executor._prune_slot_consume_guards(s, now)
+
+        self.assertIn(0, self.executor.slot_consume_guards)
+        self.assertEqual(self.executor.reserved_elixir, pending.cost)
+        extended = [
+            data for event, data in self.events
+            if event == 'slot_consume_guard_extended'
+        ]
+        self.assertEqual(len(extended), 1)
+        self.assertGreater(extended[0]['remaining_ms'], 0)
+
+    def test_slot_consume_guard_hard_timeout_releases_stale_slot_and_spend(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = now - 1.0
+        pending.sent_tick = s.tick
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq)
+        )
+        self.executor._start_slot_consume_guard(
+            pending, now - config.SLOT_CONSUME_GUARD_MAX_SECONDS - 0.1,
+            'new_source_entity',
+        )
+
+        self.executor._prune_slot_consume_guards(s, now)
+
+        self.assertNotIn(0, self.executor.slot_consume_guards)
+        self.assertEqual(self.executor.reserved_elixir, 0)
+        cleared = [
+            data for event, data in self.events
+            if event == 'slot_consume_guard_cleared'
+        ]
+        self.assertEqual(cleared[-1]['reason'], 'stale_hand_timeout')
+
     def test_spawn_ack_keeps_virtual_spend_until_hand_rotation(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
