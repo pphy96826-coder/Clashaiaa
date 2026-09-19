@@ -2,6 +2,7 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 import unittest
@@ -67,6 +68,9 @@ class HeroExecutionTests(unittest.TestCase):
         self.actuator.deploy_action.assert_not_called()
         self.raw['players'][0]['ability_runtime'][0].update(charges=0, button_state=6)
         self.state.tick += 1
+        # ACK reconciliation intentionally rejects the pre-input snapshot.
+        # Model a genuinely newer probe frame, as production does.
+        self.state.received_at = time.perf_counter()
         self.executor.poll(self.state, lambda a,s: True)
         self.assertFalse(self.executor.pending)
         self.assertIn('ability_ack', [n for n,_ in self.events])
@@ -81,8 +85,12 @@ class HeroExecutionTests(unittest.TestCase):
         self.executor.poll(self.state, lambda a,s: True)
         self.executor.future.result(timeout=2)
         self.raw['players'][0]['ability_runtime'][0].update(members=[5000041], charges=0)
-        self.executor.pending[0].sent_at -= 5
+        # Ability ACK timeout starts when the Android input transaction
+        # completes, not when it was submitted. Age that exact clock and
+        # provide a newer probe frame.
+        self.executor.ack_watch[0].input_completed_at -= 5
         self.state.tick += 1
+        self.state.received_at = time.perf_counter()
         self.executor.poll(self.state, lambda a,s: True)
         self.assertNotIn('ability_ack', [n for n,_ in self.events])
         self.assertIn('ability_ack_timeout', [n for n,_ in self.events])
