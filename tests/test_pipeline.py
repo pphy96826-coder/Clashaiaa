@@ -41,6 +41,11 @@ def play(owner=0, slot=0, card=26000010, grid=(3, 10), subcell=None, delay=1):
         metadata={'policy_effective_cost': 1.0})
 
 
+def add_enemy(s, entity_id, x, y, card_id=26000021, hp=1000):
+    s.entities.append({'id': entity_id, 'owner': 1-s.local_owner, 'card_id': card_id,
+        'x': x, 'y': y, 'hp': hp, 'max_hp': hp})
+
+
 class CoordinateTests(unittest.TestCase):
     def test_cell_center_and_building_anchor(self):
         self.assertEqual(action_world(play(grid=(7, 9))), (7500, 9500))
@@ -312,6 +317,60 @@ class ExecutorTests(unittest.TestCase):
         self.executor.submit(SimpleNamespace(actions=(play(),)),s)
         self.executor.poll(None,lambda *_:True)
         self.actuator.deploy_action.assert_not_called()
+
+
+    def _ack_first_defender(self, s, *, enemy_id=9001, enemy_x=3500, enemy_y=11500):
+        add_enemy(s, enemy_id, enemy_x, enemy_y)
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 11))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+        pending.state = 'sent'
+        pending.sent_at = time.perf_counter()
+        pending.sent_tick = s.tick
+        pending.prior_elixir = s.elixir
+        s.tick += 1
+        s.hand_cards[0] = 0
+        self.executor.poll(s, lambda *_: True)
+
+    def test_threat_reservation_suppresses_second_defender_on_same_enemy(self):
+        s = state()
+        self._ack_first_defender(s)
+        self.assertEqual(len(self.executor.threat_reservations), 1)
+        second = play(slot=1, card=s.hand_cards[1], grid=(3, 11))
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertFalse(self.executor.pending)
+        reasons = [data.get('reason') for event, data in self.events
+                   if event == 'action_suppressed']
+        self.assertIn('threat_already_committed', reasons)
+
+    def test_new_enemy_is_not_blocked_by_existing_threat_reservation(self):
+        s = state()
+        self._ack_first_defender(s)
+        add_enemy(s, 9002, 14500, 11500)
+        second = play(slot=1, card=s.hand_cards[1], grid=(14, 11))
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertEqual(len(self.executor.pending), 1)
+        self.assertEqual(self.executor.pending[0].threat_ids, frozenset((9002,)))
+
+    def test_confirmed_defence_uses_local_gate_not_global_settle(self):
+        s = state()
+        self._ack_first_defender(s)
+        self.assertEqual(self.executor._post_action_settle_tick, -1)
+        self.assertFalse(self.executor.decision_blocked(s))
+
+    def test_unclassified_play_keeps_global_settle_fallback(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+        pending.state = 'sent'
+        pending.sent_at = time.perf_counter()
+        pending.sent_tick = s.tick
+        pending.prior_elixir = s.elixir
+        s.tick += 1
+        s.hand_cards[0] = 0
+        self.executor.poll(s, lambda *_: True)
+        self.assertGreaterEqual(self.executor._post_action_settle_tick, s.tick)
 
     def test_pause_drops_plans_but_reconciles_sent_card_on_resume(self):
         s = state()
