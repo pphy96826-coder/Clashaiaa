@@ -80,6 +80,15 @@ class ActionExecutor:
     # genuinely newer probe frame and this delay, the residual threat is
     # re-evaluated instead of being hard-blocked until every body disappears.
     THREAT_REACTION_HOLD_SECONDS = 0.50
+    # Residual threat must never be judged while the original card is still
+    # awaiting its ACK outcome. Once that outcome arrives, start a new,
+    # shorter effect-observation window from the ACK/timeout itself. Spells
+    # need a little less time than troops/buildings because their impact is
+    # immediate once accepted; deployables need a few extra frames to begin
+    # interacting with the threat.
+    THREAT_POST_ACK_SPELL_GRACE_SECONDS = 0.30
+    THREAT_POST_ACK_DEPLOY_GRACE_SECONDS = 0.45
+    THREAT_POST_TIMEOUT_GRACE_SECONDS = 0.35
     THREAT_MOSTLY_HANDLED_GRACE_SECONDS = 0.35
     THREAT_RESIDUAL_RELEASE_RATIO = 0.55
     # Keep the reservation row alive through slow hand ACK telemetry, but note
@@ -378,10 +387,20 @@ class ActionExecutor:
     def _prune_threat_reservations(self, state, now=None):
         now = time.perf_counter() if now is None else now
         live_ids = self._live_entity_ids(state)
+        unresolved = {
+            int(getattr(row, 'command_seq', -1))
+            for row in self.ack_watch
+        }
         self.threat_reservations[:] = [
             reservation for reservation in self.threat_reservations
-            if now < reservation.expires_at
-            and bool(reservation.threat_ids & live_ids)
+            if bool(reservation.threat_ids & live_ids)
+            and (
+                now < reservation.expires_at
+                or (
+                    reservation.confidence == 'provisional'
+                    and reservation.command_seq in unresolved
+                )
+            )
         ]
 
     @staticmethod
@@ -395,9 +414,17 @@ class ActionExecutor:
         return len(rows), sum(float(entity['hp']) for entity in rows)
 
     def _reservation_still_suppresses(self, reservation, state, now):
-        # Never judge the result from the same snapshot that existed before the
-        # input transaction completed, and always give the reaction a short
-        # render/impact window.
+        # A provisional reservation means the original touch still has no
+        # terminal ACK outcome. Do not infer "it failed to solve the threat"
+        # from enemy HP/count while telemetry is still deciding whether the
+        # play even landed. This is the live over-defence failure mode seen
+        # when a second/third card is queued before the first defender ACKs.
+        if reservation.confidence == 'provisional':
+            return True, 'awaiting_ack', 1.0
+
+        # After accepted/timeout outcome, judge only on a genuinely newer
+        # snapshot and only after a short effect-observation grace measured
+        # from that outcome (not from the earlier input-complete time).
         received_at = float(getattr(state, 'received_at', 0.0) or 0.0)
         if (received_at <= reservation.reaction_started_at
                 or now < reservation.suppress_until):
@@ -494,11 +521,13 @@ class ActionExecutor:
             if row.command_seq == pending.command_seq
         ), None)
         if existing is not None:
-            reaction_started_at = existing.reaction_started_at
-            suppress_until = existing.suppress_until
             baseline_count = existing.baseline_count
             baseline_hp = existing.baseline_hp
         else:
+            baseline_count, baseline_hp = self._threat_metrics(
+                state, threat_ids)
+
+        if confidence == 'provisional':
             reaction_started_at = float(
                 getattr(pending, 'input_completed_at', 0.0)
                 or getattr(pending, 'sent_at', 0.0)
@@ -507,8 +536,21 @@ class ActionExecutor:
             suppress_until = (
                 reaction_started_at + self.THREAT_REACTION_HOLD_SECONDS
             )
-            baseline_count, baseline_hp = self._threat_metrics(
-                state, threat_ids)
+        else:
+            # ACK/timeout is the earliest point at which it is meaningful to
+            # start waiting for the submitted card's battlefield effect.
+            # Preserve the original threat baseline, but reset the observation
+            # clock to this outcome so a slow ACK cannot consume the whole
+            # reaction window before the first card has visibly acted.
+            reaction_started_at = now
+            card_family = int(pending.action.card_id or 0) // 1_000_000
+            if confidence == 'uncertain':
+                effect_grace = self.THREAT_POST_TIMEOUT_GRACE_SECONDS
+            elif card_family == 28:
+                effect_grace = self.THREAT_POST_ACK_SPELL_GRACE_SECONDS
+            else:
+                effect_grace = self.THREAT_POST_ACK_DEPLOY_GRACE_SECONDS
+            suppress_until = now + effect_grace
 
         # Keep the bookkeeping row alive long enough to perform the
         # residual-threat recheck after both the reaction hold and the short
