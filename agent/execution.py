@@ -262,7 +262,7 @@ class ActionExecutor:
                 return reservation, threat_ids
         return None, threat_ids
 
-    def _commit_threat_reservation(self, pending, state, now):
+    def _commit_threat_reservation(self, pending, state, now, *, confidence='confirmed'):
         if not pending.threat_ids or pending.threat_target is None:
             return False
         live_ids = self._live_entity_ids(state)
@@ -283,6 +283,7 @@ class ActionExecutor:
                  card=pending.action.card_id,
                  threat_ids=sorted(threat_ids),
                  target_world=list(pending.threat_target),
+                 confidence=confidence,
                  ttl_ms=round(self.THREAT_RESERVATION_SECONDS * 1000))
         return True
 
@@ -615,7 +616,14 @@ class ActionExecutor:
                     # Slot, resource, and identical-action guards still apply.
                     self._recent_misses[self._action_key(action)] = now + 1.0
                     self._fresh_state_required = True
-                    self._arm_post_action_recheck(state, pending, reason='ack_timeout')
+                    # On some hosts the touch is accepted before hand/elixir
+                    # telemetry rotates. If this attempted play already had a
+                    # concrete defensive threat assignment, keep only that
+                    # threat locally reserved instead of freezing every policy
+                    # decision behind the global settle/preview gate.
+                    if not self._commit_threat_reservation(
+                            pending, state, now, confidence='uncertain'):
+                        self._arm_post_action_recheck(state, pending, reason='ack_timeout')
             elif now > pending.expires:
                 self.pending.remove(pending)
                 self.log('action_expired', card=action.card_id, decision_tick=pending.decision_tick,
