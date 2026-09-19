@@ -481,6 +481,113 @@ class AdapterTests(unittest.TestCase):
             9196,
         )
 
+    def test_heavy_defense_keeps_core_defenders_on_push_lane_over_distractor(self):
+        raw = opening()
+        hand = (26000014, 27000000, 26000010, 28000000)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-defense-distractor')
+        s.elixir = 10.0
+
+        # First observe the actual heavy core in the opponent backfield so it
+        # becomes the tracked incoming push.
+        add_enemy(s, 9201, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        # A cheap opposite-lane unit arrives first.  The immediate single-lane
+        # gate points right, but Musketeer/Cannon must stay committed to the
+        # tracked left heavy push instead of being stolen by the distractor.
+        giant = next(ent for ent in s.entities if ent['id'] == 9201)
+        giant['y'] = 24000
+        add_enemy(s, 9202, 14500, 10000, card_id=26000010, hp=100)
+        s.tick += 1
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertTrue(o.action_mask.reasons['incoming_push_defending'])
+        self.assertEqual(o.action_mask.reasons['incoming_push_lane'], 'left')
+        self.assertEqual(o.action_mask.reasons['defensive_threat_lane'], 'right')
+
+        # Cannon is deliberately held until the heavy core itself approaches.
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_hold_cannon_for_heavy_core',
+        )
+        self.assertTrue(o.action_mask.reasons['heavy_defend_cannon_held'])
+
+        # Musketeer stays available, but only as a left-lane backline defender.
+        musk = o.action_mask.placement_masks['0']
+        self.assertEqual(musk['heavy_defense_lane'], 'left')
+        self.assertEqual(
+            musk['heavy_defense_musketeer_max_defensive_depth'], 9500.0)
+        self.assertTrue(any(
+            row[x] for row in musk['row_major'] for x in range(0, 9)))
+        self.assertFalse(any(
+            row[x] for row in musk['row_major'] for x in range(9, 18)))
+        for y, row in enumerate(musk['row_major']):
+            if any(row):
+                self.assertLessEqual((y + 0.5) * 1000.0, 9500.0)
+
+        # Cheap cycle may answer the immediate distractor on the right.
+        cycle = o.action_mask.placement_masks['2']
+        self.assertEqual(cycle['defensive_threat_lane'], 'right')
+
+    def test_heavy_defense_releases_cannon_into_anchor_band(self):
+        raw = opening()
+        hand = (26000014, 27000000, 26000010, 28000000)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-defense-anchor')
+        s.elixir = 10.0
+        add_enemy(s, 9203, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9203)
+        giant['y'] = 9000
+        s.tick += 1
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertTrue(o.action_mask.reasons['incoming_push_defending'])
+        self.assertFalse(o.action_mask.reasons['heavy_defend_cannon_held'])
+        self.assertTrue(o.action_mask.hand_slots[1])
+
+        cannon = o.action_mask.placement_masks['1']
+        self.assertEqual(cannon['heavy_defense_lane'], 'left')
+        self.assertEqual(
+            cannon['heavy_defense_cannon_min_defensive_depth'], 4500.0)
+        self.assertEqual(
+            cannon['heavy_defense_cannon_max_defensive_depth'], 11500.0)
+        self.assertTrue(any(
+            row[x] for row in cannon['row_major'] for x in range(0, 9)))
+        self.assertFalse(any(
+            row[x] for row in cannon['row_major'] for x in range(9, 18)))
+        for y, row in enumerate(cannon['row_major']):
+            if any(row):
+                depth = (y + 0.5) * 1000.0
+                self.assertGreaterEqual(depth, 4500.0)
+                self.assertLessEqual(depth, 11500.0)
+
+        musk = o.action_mask.placement_masks['0']
+        self.assertEqual(musk['heavy_defense_lane'], 'left')
+        self.assertEqual(
+            musk['heavy_defense_musketeer_max_defensive_depth'], 9500.0)
+
     def test_incoming_push_suppresses_stale_counterpush_bias(self):
         a, s = self.adapter()
         s.elixir = 9.0
