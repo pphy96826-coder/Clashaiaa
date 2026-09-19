@@ -1092,6 +1092,108 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(len(acks), 1)
         self.assertEqual(acks[0]['evidence'], 'hand_rotation')
 
+    def test_native_cycle_transition_confirms_stale_hand_and_recovers_slot(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        player = next(p for p in s.raw['players'] if p['owner'] == s.local_owner)
+        prior_cycle = tuple(player['cycle'])
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = now - 0.10
+        pending.input_completed_at = now - 0.05
+        pending.prior_elixir = s.elixir
+        pending.prior_cycle = prior_cycle
+        pending.prior_raw_hand_card = first.card_id
+        pending.ack_timeout_seconds = config.CARD_ACK_TIMEOUT_BASE_SECONDS
+        self.executor.ack_watch.append(pending)
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq)
+        )
+
+        # Native cycle advances exactly as a consumed card should, but the
+        # hand slot itself is still stale. This is authoritative consume
+        # evidence and also identifies the replacement as prior_cycle[0].
+        player['cycle'] = list(prior_cycle[1:]) + [first.card_id]
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(acks[-1]['evidence'], 'native_cycle_transition')
+        self.assertEqual(s.hand_cards[0], prior_cycle[0])
+        self.assertNotIn(0, self.executor.blocked_slots(s))
+        self.assertEqual(self.executor.reserved_elixir, 0)
+        self.assertEqual(
+            self.executor.slot_hand_overrides[0]['card_id'],
+            prior_cycle[0],
+        )
+
+    def test_unrelated_cycle_change_never_recovers_stale_guard(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = now - 0.2
+        pending.prior_raw_hand_card = first.card_id
+        self.executor._start_slot_consume_guard(
+            pending,
+            now - config.SLOT_CONSUME_GUARD_MAX_SECONDS - 0.1,
+            'new_source_entity',
+        )
+        player = next(p for p in s.raw['players'] if p['owner'] == s.local_owner)
+        cycle = list(player['cycle'])
+        # Keep a valid four-card cycle but make it inconsistent with the
+        # other three raw hand slots. No unique stale-slot replacement exists.
+        player['cycle'] = [cycle[0], cycle[1], cycle[2], s.hand_cards[1]]
+
+        self.executor._prune_slot_consume_guards(s, now)
+
+        self.assertIn(0, self.executor.slot_consume_guards)
+        self.assertNotIn(0, self.executor.slot_hand_overrides)
+        self.assertIn(0, self.executor.blocked_slots(s))
+
+    def test_stale_guard_recovers_from_unique_cycle_hand_partition(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        player = next(p for p in s.raw['players'] if p['owner'] == s.local_owner)
+        prior_cycle = tuple(player['cycle'])
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = now - 0.2
+        pending.prior_raw_hand_card = first.card_id
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq)
+        )
+        self.executor._start_slot_consume_guard(
+            pending, now - config.ELIXIR_RESERVATION_SECONDS - 0.1,
+            'new_source_entity',
+        )
+
+        # The three other raw slots plus the new exact cycle leave one and
+        # only one possible card for slot zero.
+        player['cycle'] = list(prior_cycle[1:]) + [first.card_id]
+        self.executor._prune_slot_consume_guards(s, now)
+
+        self.assertNotIn(0, self.executor.slot_consume_guards)
+        self.assertEqual(s.hand_cards[0], prior_cycle[0])
+        self.assertNotIn(0, self.executor.blocked_slots(s))
+        recovered = [
+            data for event, data in self.events
+            if event == 'slot_consume_guard_recovered'
+        ]
+        self.assertEqual(recovered[-1]['replacement_card'], prior_cycle[0])
+        self.assertFalse(recovered[-1]['slot_remains_blocked'])
+
     def test_card_ack_timeout_adapts_but_stays_bounded(self):
         self.executor._ack_latency_samples_ms[:] = [720.0, 880.0, 960.0]
         self.executor.end_to_end_latency_ms = 180.0
