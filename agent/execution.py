@@ -411,6 +411,26 @@ class ActionExecutor:
                 return max(0, int(row.get('card_id', 0)))
         return 0
 
+    def _authoritative_hand_card(self, state, slot, owner=None):
+        """Return raw hand telemetry unless the test/state explicitly differs.
+
+        Production BattleState.hand_cards is parsed from the same raw snapshot,
+        so a difference only exists for our cycle overlay or a deliberately
+        constructed test state. Never let our own overlay count as native hand
+        rotation evidence.
+        """
+        raw = self._raw_hand_card(state, slot, owner)
+        if state is None or slot is None:
+            return raw
+        slot = int(slot)
+        if slot in self.slot_hand_overrides:
+            return raw
+        if 0 <= slot < len(state.hand_cards):
+            visible = int(state.hand_cards[slot])
+            if raw is None or visible != int(raw):
+                return visible
+        return raw
+
     def _native_cycle(self, state, owner=None):
         player = self._raw_player(state, owner)
         if player is None:
@@ -555,7 +575,7 @@ class ActionExecutor:
         for slot, guard in list(self.slot_consume_guards.items()):
             card_id = int(guard['card_id'])
             raw_baseline_card = int(guard.get('raw_baseline_card', card_id))
-            raw_card = self._raw_hand_card(state, slot)
+            raw_card = self._authoritative_hand_card(state, slot)
             rotated = (
                 raw_card is not None
                 and int(raw_card) != raw_baseline_card
@@ -941,7 +961,7 @@ class ActionExecutor:
                 if ack_timeout_seconds <= 0:
                     ack_timeout_seconds = self._card_ack_timeout_seconds()
                     pending.ack_timeout_seconds = ack_timeout_seconds
-                raw_hand_card = self._raw_hand_card(
+                raw_hand_card = self._authoritative_hand_card(
                     state, action.hand_slot, action.owner)
                 hand_changed = (
                     state.tick > pending.sent_tick
