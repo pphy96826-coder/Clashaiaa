@@ -1291,13 +1291,13 @@ class FeatureAdapter:
         self.quality['attack_window_reason'] = (
             attack_window['reason'] if attack_window else None)
         self.quality['attack_window_card_id'] = (
-            building_attack_window['card_id'] if building_attack_window else None)
+            attack_window.get('card_id') if attack_window else None)
         self.quality['attack_window_age_ticks'] = (
-            building_attack_window.get('age_ticks') if building_attack_window else None)
+            attack_window.get('age_ticks') if attack_window else None)
         self.quality['attack_window_plays_since'] = (
-            building_attack_window.get('plays_since') if building_attack_window else None)
+            attack_window.get('plays_since') if attack_window else None)
         self.quality['attack_window_plays_until_return'] = (
-            building_attack_window.get('plays_until_return') if building_attack_window else None)
+            attack_window.get('plays_until_return') if attack_window else None)
         self.quality['active_enemy_building_count'] = len(self._active_enemy_buildings)
         self.quality['opponent_exact_play_count'] = self._opponent_exact_play_count
         for slot, cid in slots.items():
@@ -1391,13 +1391,13 @@ class FeatureAdapter:
                      'attack_window_reason': (
                          attack_window['reason'] if attack_window else None),
                      'attack_window_card_id': (
-                         building_attack_window['card_id'] if building_attack_window else None),
+                         attack_window.get('card_id') if attack_window else None),
                      'attack_window_age_ticks': (
-                         building_attack_window.get('age_ticks') if building_attack_window else None),
+                         attack_window.get('age_ticks') if attack_window else None),
                      'attack_window_plays_since': (
-                         building_attack_window.get('plays_since') if building_attack_window else None),
+                         attack_window.get('plays_since') if attack_window else None),
                      'attack_window_plays_until_return': (
-                         building_attack_window.get('plays_until_return') if building_attack_window else None),
+                         attack_window.get('plays_until_return') if attack_window else None),
                      'active_enemy_building_count': len(self._active_enemy_buildings),
                      'opponent_exact_play_count': self._opponent_exact_play_count,
                      'opponent_elixir_lower': (
