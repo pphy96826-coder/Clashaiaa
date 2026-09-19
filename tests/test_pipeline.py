@@ -358,6 +358,47 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(any(row[x] for row in cannon['row_major'] for x in range(0, 9)))
         self.assertFalse(any(row[x] for row in cannon['row_major'] for x in range(9, 18)))
 
+    def test_exact_heavy_play_binds_unknown_runtime_carrier(self):
+        raw = opening()
+        enemy_owner = 1
+        enemy = next(p for p in raw['players'] if p['owner'] == enemy_owner)
+        enemy['hand'][0]['card_id'] = 26000003
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'incoming-push-runtime-carrier')
+
+        # The native hand transition proves Giant was played, but the spawned
+        # runtime carrier exposes an unsupported archetype/form ID instead of
+        # the source card.  The adapter should still bind the public body to
+        # that exact heavy play and enter preparation immediately.
+        enemy_live = next(
+            p for p in s.raw['players'] if int(p['owner']) == enemy_owner)
+        enemy_live['hand'][0]['card_id'] = 26000010
+        add_enemy(s, 9196, 3500, 26000, card_id=203000003, hp=3000)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'prepare_defense')
+        self.assertTrue(o.action_mask.reasons['incoming_push_active'])
+        self.assertEqual(o.action_mask.reasons['incoming_push_card_id'], 26000003)
+        self.assertEqual(
+            o.action_mask.reasons['incoming_push_evidence'],
+            'exact_play_plus_new_backfield_entity',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['opponent_last_exact_play_card_id'],
+            26000003,
+        )
+        self.assertEqual(
+            o.action_mask.reasons['opponent_recent_heavy_card_id'],
+            26000003,
+        )
+        self.assertEqual(
+            o.action_mask.reasons['opponent_recent_heavy_bound_entity_id'],
+            9196,
+        )
+
     def test_incoming_push_suppresses_stale_counterpush_bias(self):
         a, s = self.adapter()
         s.elixir = 9.0
