@@ -718,6 +718,58 @@ class FeatureAdapter:
             'width': width,
         }
 
+    @staticmethod
+    def _attack_opportunity_context(effective_elixir, *, defensive_pressure=False,
+                                    near_tower_pressure=None, counterpush=None,
+                                    building_window=None, low_elixir_window=None):
+        """Collapse offensive timing signals into one ordered public context.
+
+        The context is advisory and deliberately conservative: defense always
+        wins, counterpush support wins over generic timing windows, exact/recent
+        building windows win over low-elixir pressure, and anti-overflow is the
+        lowest-priority release.  This keeps the mask from applying several
+        independent "go now" rules to the same frame.
+        """
+        if defensive_pressure or near_tower_pressure is not None:
+            return None
+        if counterpush is not None:
+            return {
+                'kind': 'counterpush',
+                'reason': 'counterpush_support',
+                'release_hog': True,
+                'lane': counterpush.get('lane'),
+                'support_entity_id': counterpush.get('support_entity_id'),
+                'support_card_id': counterpush.get('support_card_id'),
+            }
+        if building_window is not None:
+            return {
+                'kind': 'building_window',
+                'reason': building_window['reason'],
+                'release_hog': True,
+                'lane': None,
+                'card_id': building_window.get('card_id'),
+                'age_ticks': building_window.get('age_ticks'),
+                'plays_since': building_window.get('plays_since'),
+                'plays_until_return': building_window.get('plays_until_return'),
+            }
+        if low_elixir_window is not None:
+            return {
+                'kind': 'low_elixir',
+                'reason': low_elixir_window['reason'],
+                'release_hog': True,
+                'lane': None,
+                'opponent_elixir_lower': low_elixir_window.get('lower'),
+                'opponent_elixir_upper': low_elixir_window.get('upper'),
+            }
+        if float(effective_elixir) >= NEUTRAL_PATIENCE_RELEASE_ELIXIR:
+            return {
+                'kind': 'anti_overflow',
+                'reason': 'near_elixir_cap',
+                'release_hog': True,
+                'lane': None,
+            }
+        return None
+
     def _counterpush_context(self, pressure=None):
         """Detect one unambiguous surviving support lane after defense.
 
@@ -1174,15 +1226,6 @@ class FeatureAdapter:
         attack_hold = self._attack_hold_context(elixir, near_tower_pressure)
         counterpush = self._counterpush_context(
             True if defensive_pressure else near_tower_pressure)
-        strategy_phase = (
-            'defend' if defensive_pressure or near_tower_pressure is not None else
-            'counterpush' if counterpush is not None else
-            'neutral'
-        )
-        neutral_patience = (
-            strategy_phase == 'neutral'
-            and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
-        )
         exact_building_cycle_window = self._exact_building_cycle_window(
             defensive_pressure=defensive_pressure)
         building_attack_window = (
@@ -1193,7 +1236,42 @@ class FeatureAdapter:
         low_elixir_attack_window = self._low_elixir_attack_window(
             elixir, opponent_elixir_bounds,
             defensive_pressure=defensive_pressure)
-        attack_window = building_attack_window or low_elixir_attack_window
+        attack_opportunity = self._attack_opportunity_context(
+            elixir,
+            defensive_pressure=defensive_pressure,
+            near_tower_pressure=near_tower_pressure,
+            counterpush=counterpush,
+            building_window=building_attack_window,
+            low_elixir_window=low_elixir_attack_window,
+        )
+        strategy_phase = (
+            'defend' if defensive_pressure or near_tower_pressure is not None else
+            'counterpush' if (
+                attack_opportunity is not None
+                and attack_opportunity.get('kind') == 'counterpush'
+            ) else
+            'neutral'
+        )
+        neutral_patience = (
+            strategy_phase == 'neutral'
+            and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
+        )
+        # Backward-compatible attack-window diagnostics remain limited to the
+        # building/low-elixir signals; the unified context also records
+        # counterpush and anti-overflow opportunities.
+        attack_window = (
+            building_attack_window or low_elixir_attack_window
+            if attack_opportunity is not None
+            and attack_opportunity.get('kind') in ('building_window', 'low_elixir')
+            else None
+        )
+        hog_opportunity_release = bool(
+            attack_opportunity is not None
+            and attack_opportunity.get('release_hog') is True
+        )
+        hog_opportunity_lane = (
+            attack_opportunity.get('lane') if attack_opportunity else None
+        )
         self.quality['strategy_phase'] = strategy_phase
         self.quality['attack_hold_reason'] = (
             attack_hold['reason'] if attack_hold else None)
@@ -1204,6 +1282,12 @@ class FeatureAdapter:
         self.quality['counterpush_support_entity_id'] = (
             counterpush['support_entity_id'] if counterpush else None)
         self.quality['neutral_patience_active'] = neutral_patience
+        self.quality['attack_opportunity_active'] = attack_opportunity is not None
+        self.quality['attack_opportunity_kind'] = (
+            attack_opportunity.get('kind') if attack_opportunity else None)
+        self.quality['attack_opportunity_reason'] = (
+            attack_opportunity.get('reason') if attack_opportunity else None)
+        self.quality['attack_opportunity_lane'] = hog_opportunity_lane
         self.quality['attack_window_reason'] = (
             attack_window['reason'] if attack_window else None)
         self.quality['attack_window_card_id'] = (
@@ -1248,7 +1332,7 @@ class FeatureAdapter:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
             if neutral_patience and cid in NEUTRAL_PATIENCE_CARDS:
-                if not (cid == HOG_RIDER and attack_window is not None):
+                if not (cid == HOG_RIDER and hog_opportunity_release):
                     slot_reasons[str(slot)] = 'strategy_neutral_patience'
                     continue
             entry = self.build_placement_mask(cid, lanes, towers, entities,
@@ -1257,9 +1341,9 @@ class FeatureAdapter:
             if defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
                 entry = self._mask_to_defensive_lane(
                     entry, defensive_lane_gate['threat_lane'])
-            if cid == HOG_RIDER and counterpush is not None:
+            if cid == HOG_RIDER and hog_opportunity_lane is not None:
                 entry = self._mask_to_lane(
-                    entry, counterpush['lane'], 'counterpush_lane')
+                    entry, hog_opportunity_lane, 'attack_opportunity_lane')
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
@@ -1297,6 +1381,13 @@ class FeatureAdapter:
                          counterpush['support_card_id'] if counterpush else None),
                      'neutral_patience_active': neutral_patience,
                      'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR,
+                     'attack_opportunity_active': attack_opportunity is not None,
+                     'attack_opportunity_kind': (
+                         attack_opportunity.get('kind') if attack_opportunity else None),
+                     'attack_opportunity_reason': (
+                         attack_opportunity.get('reason') if attack_opportunity else None),
+                     'attack_opportunity_lane': hog_opportunity_lane,
+                     'attack_opportunity_release_hog': hog_opportunity_release,
                      'attack_window_reason': (
                          attack_window['reason'] if attack_window else None),
                      'attack_window_card_id': (
