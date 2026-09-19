@@ -49,7 +49,7 @@ class ActionExecutor:
     # tied to one concrete live enemy.  A short reservation suppresses another
     # card aimed at that same enemy while allowing immediate reactions to a
     # different threat.
-    THREAT_RESERVATION_SECONDS = 0.9
+    THREAT_RESERVATION_SECONDS = 0.45
     THREAT_RESERVATION_RADIUS_WORLD = 6000.0
 
     def __init__(self, actuator, log, dry_run=False, on_ability_ack=None, max_actions=None):
