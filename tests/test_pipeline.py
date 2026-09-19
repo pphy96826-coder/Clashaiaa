@@ -1201,6 +1201,10 @@ class ExecutorTests(unittest.TestCase):
         reasons = [data.get('reason') for event, data in self.events
                    if event == 'action_suppressed']
         self.assertIn('threat_already_committed', reasons)
+        starts = [data for event, data in self.events
+                  if event == 'threat_reservation_started'
+                  and data.get('confidence') == 'confirmed']
+        self.assertEqual(starts[-1]['ttl_ms'], 850)
 
     def test_new_enemy_is_not_blocked_by_existing_threat_reservation(self):
         s = state()
