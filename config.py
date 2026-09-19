@@ -126,10 +126,14 @@ FULL_SIMULATION_REQUIRE_STANDARD_DECK = SETTINGS.get(
 FULL_SIMULATION_PARTIAL_OPPONENT = SETTINGS.get(
     'full_simulation_partial_opponent', True) is True
 STALE_SECONDS = 1.2
-# Hand rotation is advisory telemetry, not an input gate.  Release a missed
-# action quickly so a slow/missing ACK cannot stall the match for seconds;
-# the touch worker remains strictly serial and never replays the write.
+# Ability ACKs stay short because an ambiguous skill tap is never replayed.
+# Card ACKs use a separate bounded adaptive budget below: while waiting, only
+# that exact native slot is locked, so unrelated cards can still be played.
 ACK_TIMEOUT_SECONDS = 0.35
+CARD_ACK_TIMEOUT_BASE_SECONDS = 1.0
+CARD_ACK_TIMEOUT_MAX_SECONDS = 1.2
+CARD_ACK_TIMEOUT_MARGIN_SECONDS = 0.18
+CARD_ACK_TIMEOUT_INPUT_MULTIPLIER = 2.0
 # Keep an ambiguous touch visible to the model briefly after timeout.  The
 # card remains usable and other slots are not blocked; this only prevents a
 # missing ACK from making the same threat look completely untouched.
