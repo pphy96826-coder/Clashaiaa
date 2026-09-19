@@ -608,6 +608,34 @@ class ActionExecutor:
                     continue
                 hand_changed = (state.tick > pending.sent_tick and
                                 state.hand_cards[action.hand_slot] != action.card_id)
+
+                # Troops/buildings can provide a second, strictly positive ACK
+                # signal: a new own entity from the submitted source card that
+                # did not exist before the input. Missing this signal never
+                # proves failure, but seeing it proves the deploy reached the
+                # game even when hand/elixir telemetry is late.
+                card_family = int(action.card_id or 0) // 1_000_000
+                spawn_ack = False
+                spawn_entity_id = None
+                if card_family in (26, 27):
+                    evolved_play = (
+                        action.card_id in BINDINGS
+                        and action.metadata.get('policy_effective_form_code') == 1
+                    )
+                    for entity in state.entities:
+                        entity_id = entity.get('id')
+                        if not isinstance(entity_id, int) or entity_id in pending.prior_entities:
+                            continue
+                        if entity.get('owner') != action.owner:
+                            continue
+                        if evolved_play:
+                            matches = is_evolved_entity(entity, action.card_id)
+                        else:
+                            matches = entity.get('card_id') == action.card_id
+                        if matches:
+                            spawn_ack = True
+                            spawn_entity_id = entity_id
+                            break
                 # Some probe revisions publish elixir before hand rotation.
                 # Treat a sufficiently large, near-immediate cost drop as a
                 # fallback ACK.  Natural regeneration cannot satisfy this
@@ -619,7 +647,7 @@ class ActionExecutor:
                         and state.elixir is not None):
                     elixir_changed = (state.tick > pending.sent_tick and
                         float(state.elixir) <= float(pending.prior_elixir) - pending.cost + 0.15)
-                if hand_changed or elixir_changed:
+                if hand_changed or elixir_changed or spawn_ack:
                     self.ack_watch.remove(pending)
                     self._clear_spend(pending.command_seq)
                     self.log('hand_ack', card=action.card_id, slot=action.hand_slot,
@@ -629,7 +657,10 @@ class ActionExecutor:
                         input_to_ack_ms=(now-ack_started_at)*1000,
                         input_start_to_ack_ms=(now-pending.sent_at)*1000,
                         outcome='accepted',
-                        evidence=('hand_rotation' if hand_changed else 'elixir_cost_drop'))
+                        evidence=('hand_rotation' if hand_changed else
+                                  'elixir_cost_drop' if elixir_changed else
+                                  'new_source_entity'),
+                        spawn_entity_id=spawn_entity_id)
                     if action.card_id in BINDINGS and action.metadata.get('policy_effective_form_code') == 1:
                         player = next(p for p in state.raw['players'] if p['owner'] == action.owner)
                         row = next((r for r in player.get('card_runtime', []) if r.get('card_id') == action.card_id), {})
