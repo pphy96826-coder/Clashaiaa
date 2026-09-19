@@ -34,6 +34,9 @@ class PendingAction:
     prior_raw_hand_card: int | None = None
     retry_count: int = 0
     retry_probe_tick: int = -1
+    retry_probe_cycle: tuple[int, ...] | None = None
+    retry_probe_elixir: float | None = None
+    retry_waiting: bool = False
 
 
 @dataclass(frozen=True)
@@ -1214,13 +1217,69 @@ class ActionExecutor:
                     # win normally instead of being mistaken for a miss.
                     if (action.kind.value == 'play_card'
                             and getattr(pending, 'retry_count', 0) < 1
-                            and len(self.ack_watch) == 1
                             and (self.max_actions is None
                                  or self.attempted_actions < self.max_actions)):
+                        def retry_due(row):
+                            row_action = row.action
+                            if (row_action.kind.value != 'play_card'
+                                    or getattr(row, 'retry_count', 0) >= 1):
+                                return False
+                            row_started = (
+                                row.input_completed_at or row.sent_at)
+                            row_timeout = (
+                                row.ack_timeout_seconds
+                                or self._card_ack_timeout_seconds())
+                            return now - row_started > row_timeout
+
+                        retry_candidates = [
+                            row for row in self.ack_watch
+                            if retry_due(row)
+                        ]
+                        retry_leader = (
+                            min(retry_candidates,
+                                key=lambda row: row.command_seq)
+                            if retry_candidates else pending
+                        )
+                        if retry_leader is not pending:
+                            if not getattr(pending, 'retry_waiting', False):
+                                pending.retry_waiting = True
+                                self.log('action_retry_waiting',
+                                         card=action.card_id,
+                                         slot=action.hand_slot,
+                                         command_seq=pending.command_seq,
+                                         tick=state.tick,
+                                         waiting_for=retry_leader.command_seq,
+                                         reason='older_timed_out_retry')
+                            continue
+
+                        live_competitors = [
+                            row for row in self.ack_watch
+                            if row is not pending and not retry_due(row)
+                        ]
+                        if live_competitors:
+                            if not getattr(pending, 'retry_waiting', False):
+                                pending.retry_waiting = True
+                                self.log('action_retry_waiting',
+                                         card=action.card_id,
+                                         slot=action.hand_slot,
+                                         command_seq=pending.command_seq,
+                                         tick=state.tick,
+                                         waiting_for=min(
+                                             row.command_seq
+                                             for row in live_competitors),
+                                         reason='live_ack_watch')
+                            continue
+
                         retry_probe_tick = int(
                             getattr(pending, 'retry_probe_tick', -1))
                         if retry_probe_tick < 0:
+                            pending.retry_waiting = False
                             pending.retry_probe_tick = int(state.tick)
+                            pending.retry_probe_cycle = self._native_cycle(
+                                state, action.owner)
+                            pending.retry_probe_elixir = (
+                                float(state.elixir)
+                                if state.elixir is not None else None)
                             self._fresh_state_required = True
                             self.log('action_retry_armed',
                                      card=action.card_id,
@@ -1241,22 +1300,28 @@ class ActionExecutor:
                             raw_hand_card is not None
                             and int(raw_hand_card) == hand_baseline
                         )
+                        probe_cycle = getattr(
+                            pending, 'retry_probe_cycle', None)
                         same_cycle = (
-                            getattr(pending, 'prior_cycle', None) is None
-                            or current_cycle == getattr(
-                                pending, 'prior_cycle', None)
+                            probe_cycle is None
+                            or current_cycle == probe_cycle
                         )
+                        probe_elixir = getattr(
+                            pending, 'retry_probe_elixir', None)
                         no_cost_drop = (
-                            pending.prior_elixir is None
+                            probe_elixir is None
                             or state.elixir is None
                             or float(state.elixir) >
-                               float(pending.prior_elixir) - pending.cost + 0.15
+                               float(probe_elixir) - pending.cost + 0.15
                         )
                         if same_hand and same_cycle and no_cost_drop:
                             self.ack_watch.remove(pending)
                             pending.state = 'queued'
                             pending.retry_count += 1
                             pending.retry_probe_tick = -1
+                            pending.retry_probe_cycle = None
+                            pending.retry_probe_elixir = None
+                            pending.retry_waiting = False
                             pending.due = now
                             pending.expires = (
                                 now + config.ACTION_MAX_LATENESS_SECONDS)
@@ -1270,7 +1335,7 @@ class ActionExecutor:
                                      command_seq=pending.command_seq,
                                      tick=state.tick,
                                      retry_count=pending.retry_count,
-                                     evidence='fresh_unchanged_hand_and_cycle')
+                                     evidence='fresh_stable_hand_cycle_and_elixir')
                             continue
                     self.ack_watch.remove(pending)
                     # A missing ACK is ambiguous: the touch may have reached
