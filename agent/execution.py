@@ -119,6 +119,19 @@ class ActionExecutor:
         self._confirmed_for_simulation.clear()
         return actions
 
+    @property
+    def action_budget_exhausted(self):
+        return (self.max_actions is not None
+                and self.attempted_actions >= self.max_actions)
+
+    @property
+    def action_budget_settled(self):
+        """Budget is spent and every submitted touch has a final ACK outcome."""
+        return (self.action_budget_exhausted
+                and self.future is None
+                and not self.pending
+                and not self.ack_watch)
+
     def decision_blocked(self, state=None):
         """Whether a new policy turn must wait for an authoritative frame."""
         if time.perf_counter() < self._decision_blocked_until:
