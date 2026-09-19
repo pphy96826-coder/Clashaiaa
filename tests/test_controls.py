@@ -7,9 +7,56 @@ from unittest.mock import Mock, call, patch
 from live_lifecycle import LiveLifecycle, LifecycleError
 from main import parse_args
 from runtime_console import AgentConsole, ConsoleCommand
+from desktop_console import ConsoleConfig, build_runner_command, config_from_dict, load_config, save_config
 
 
 class ConsoleTests(unittest.TestCase):
+    def test_runner_command_builds_selected_modes(self):
+        command = build_runner_command(
+            ConsoleConfig(
+                checkpoint='general', device='cpu', continuous=True,
+                max_matches='3', launch_mode='attach', log_path='logs/ui.jsonl',
+            ),
+            root=Path('/repo'), python_executable=Path('/repo/.venv/bin/python'),
+        )
+        self.assertEqual(command, [
+            '/repo/.venv/bin/python', '-u', '/repo/main.py',
+            '--checkpoint', 'general', '--device', 'cpu', '--console',
+            '--continuous', '--max-matches', '3', '--attach-active',
+            '--log', 'logs/ui.jsonl',
+        ])
+
+    def test_runner_command_rejects_max_matches_without_continuous(self):
+        with self.assertRaisesRegex(ValueError, 'continuous'):
+            build_runner_command(ConsoleConfig(continuous=False, max_matches='1'))
+
+    def test_runner_command_uses_start_battle_by_default(self):
+        command = build_runner_command(
+            ConsoleConfig(device='cpu', continuous=False, launch_mode='start'),
+            root=Path('/repo'), python_executable='/usr/bin/python3',
+        )
+        self.assertIn('--start-battle', command)
+        self.assertNotIn('--continuous', command)
+
+    def test_console_config_round_trip_is_json_and_ignores_unknown_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'console.json'
+            expected = ConsoleConfig(
+                checkpoint='general', device='mps', continuous=False,
+                max_matches='', launch_mode='attach', log_path='/tmp/live.jsonl',
+            )
+            save_config(expected, path)
+            raw = json.loads(path.read_text(encoding='utf-8'))
+            raw['future_field'] = 'ignored'
+            path.write_text(json.dumps(raw), encoding='utf-8')
+            self.assertEqual(load_config(path), expected)
+
+    def test_config_from_dict_falls_back_for_invalid_values(self):
+        loaded = config_from_dict({'continuous': 'yes', 'launch_mode': 'invalid', 'device': 3})
+        self.assertEqual(loaded.continuous, ConsoleConfig.continuous)
+        self.assertEqual(loaded.launch_mode, 'start')
+        self.assertEqual(loaded.device, ConsoleConfig.device)
+
     def test_parse_commands_and_comments(self):
         self.assertEqual(AgentConsole.parse(' model general '),
                          ConsoleCommand('model', ('general',)))
