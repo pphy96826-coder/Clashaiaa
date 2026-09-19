@@ -50,6 +50,8 @@ ATTACK_HOLD_TOWER_DISTANCE = 7000.0
 ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR = 8.0
 NEUTRAL_PATIENCE_RELEASE_ELIXIR = 8.5
 RECENT_BUILDING_ATTACK_WINDOW_TICKS = 50
+LOW_ELIXIR_ATTACK_MAX_UPPER = 4.0
+LOW_ELIXIR_ATTACK_MAX_WIDTH = 1.0
 COUNTERPUSH_MIN_PROGRESS = 9000.0
 COUNTERPUSH_MAX_PROGRESS = 17000.0
 
@@ -661,6 +663,25 @@ class FeatureAdapter:
             'remaining_ticks': RECENT_BUILDING_ATTACK_WINDOW_TICKS - age,
         }
 
+    @staticmethod
+    def _low_elixir_attack_window(effective_elixir, opponent_elixir_bounds,
+                                  defensive_pressure=False):
+        """Use only a tight FAIR tracker bound as a low-elixir punish signal."""
+        if defensive_pressure or float(effective_elixir) < 4.0:
+            return None
+        if opponent_elixir_bounds is None:
+            return None
+        low, high = map(float, opponent_elixir_bounds)
+        width = max(0.0, high - low)
+        if high > LOW_ELIXIR_ATTACK_MAX_UPPER or width > LOW_ELIXIR_ATTACK_MAX_WIDTH:
+            return None
+        return {
+            'reason': 'opponent_low_elixir',
+            'lower': low,
+            'upper': high,
+            'width': width,
+        }
+
     def _counterpush_context(self, pressure=None):
         """Detect one unambiguous surviving support lane after defense.
 
@@ -1128,6 +1149,10 @@ class FeatureAdapter:
         )
         building_attack_window = self._recent_building_attack_window(
             state.tick, defensive_pressure=defensive_pressure)
+        low_elixir_attack_window = self._low_elixir_attack_window(
+            elixir, opponent_elixir_bounds,
+            defensive_pressure=defensive_pressure)
+        attack_window = building_attack_window or low_elixir_attack_window
         self.quality['strategy_phase'] = strategy_phase
         self.quality['attack_hold_reason'] = (
             attack_hold['reason'] if attack_hold else None)
@@ -1139,7 +1164,7 @@ class FeatureAdapter:
             counterpush['support_entity_id'] if counterpush else None)
         self.quality['neutral_patience_active'] = neutral_patience
         self.quality['attack_window_reason'] = (
-            building_attack_window['reason'] if building_attack_window else None)
+            attack_window['reason'] if attack_window else None)
         self.quality['attack_window_card_id'] = (
             building_attack_window['card_id'] if building_attack_window else None)
         self.quality['attack_window_age_ticks'] = (
@@ -1177,7 +1202,7 @@ class FeatureAdapter:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
             if neutral_patience and cid in NEUTRAL_PATIENCE_CARDS:
-                if not (cid == HOG_RIDER and building_attack_window is not None):
+                if not (cid == HOG_RIDER and attack_window is not None):
                     slot_reasons[str(slot)] = 'strategy_neutral_patience'
                     continue
             entry = self.build_placement_mask(cid, lanes, towers, entities,
@@ -1227,7 +1252,7 @@ class FeatureAdapter:
                      'neutral_patience_active': neutral_patience,
                      'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR,
                      'attack_window_reason': (
-                         building_attack_window['reason'] if building_attack_window else None),
+                         attack_window['reason'] if attack_window else None),
                      'attack_window_card_id': (
                          building_attack_window['card_id'] if building_attack_window else None),
                      'attack_window_age_ticks': (
