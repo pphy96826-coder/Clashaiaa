@@ -544,6 +544,9 @@ class ExecutorTests(unittest.TestCase):
 
     def test_spell_never_uses_near_target_entity_fallback(self):
         s = state()
+        # Put an actual spell in the selected native hand slot.  submit()
+        # intentionally rejects card/slot mismatches before any ACK logic.
+        s.hand_cards[0] = 28000000
         first = play(slot=0, card=28000000, grid=(8, 20))
         self.executor.submit(SimpleNamespace(actions=(first,)), s)
         pending = self.executor.pending.pop(0)
