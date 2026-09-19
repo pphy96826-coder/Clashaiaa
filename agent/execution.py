@@ -80,6 +80,7 @@ class ActionExecutor:
     # genuinely newer probe frame and this delay, the residual threat is
     # re-evaluated instead of being hard-blocked until every body disappears.
     THREAT_REACTION_HOLD_SECONDS = 0.50
+    THREAT_MOSTLY_HANDLED_GRACE_SECONDS = 0.35
     THREAT_RESIDUAL_RELEASE_RATIO = 0.55
     # Keep the reservation row alive through slow hand ACK telemetry, but note
     # that expires_at is only bookkeeping. Suppression after the reaction hold
@@ -421,13 +422,17 @@ class ActionExecutor:
             # each has lost substantial HP, so preserve the larger signal.
             residual_ratio = max(count_ratio, hp_ratio)
 
-        return (
-            residual_ratio < self.THREAT_RESIDUAL_RELEASE_RATIO,
-            'residual_mostly_handled'
-            if residual_ratio < self.THREAT_RESIDUAL_RELEASE_RATIO
-            else 'residual_still_dangerous',
-            residual_ratio,
-        )
+        if residual_ratio >= self.THREAT_RESIDUAL_RELEASE_RATIO:
+            return False, 'residual_still_dangerous', residual_ratio
+
+        # A mostly handled cohort gets only a small finishing grace. It is not
+        # considered solved forever: if a survivor is still worth defending
+        # after this bounded grace, a fresh policy decision may spend again.
+        if now < (
+                reservation.suppress_until
+                + self.THREAT_MOSTLY_HANDLED_GRACE_SECONDS):
+            return True, 'residual_mostly_handled', residual_ratio
+        return False, 'residual_grace_elapsed', residual_ratio
 
     def _matching_threat_reservation(self, action, state):
         now = time.perf_counter()
