@@ -390,6 +390,50 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(acks[0]['spawn_entity_id'], new_id)
         self.assertGreaterEqual(acks[0]['latency_ms'], 0)
 
+    def test_new_hero_musketeer_carrier_confirms_source_card(self):
+        s = state()
+        first = play(slot=1, card=26000014, grid=(8, 20))
+        first = replace(first, metadata={
+            **first.metadata,
+            'policy_effective_form_code': 2,
+        })
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = time.perf_counter() - 0.15
+        pending.input_completed_at = time.perf_counter() - 0.10
+        pending.prior_elixir = s.elixir
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        self.executor.ack_watch.append(pending)
+
+        new_id = 9014
+        s.entities.append({
+            'id': new_id,
+            'owner': s.local_owner,
+            'card_id': 203000014,
+            'x': 8500,
+            'y': 20500,
+            'hp': 1000,
+            'max_hp': 1000,
+        })
+        player = next(p for p in s.raw['players'] if p['owner'] == s.local_owner)
+        player['ability_runtime'] = [{
+            'known': True,
+            'ability_name': 'Musketeer_hero_Ability',
+            'members': [new_id],
+        }]
+        s.tick += 1
+        s.received_at = pending.input_completed_at + 0.01
+
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(len(acks), 1)
+        self.assertEqual(acks[0]['evidence'], 'new_source_entity')
+        self.assertEqual(acks[0]['spawn_entity_id'], new_id)
+
     def test_ack_watch_requires_post_input_probe_frame(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
