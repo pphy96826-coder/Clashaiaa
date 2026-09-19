@@ -322,7 +322,8 @@ class CustomCardDeployAgent:
                         f"battle={'active' if current_state is not None else 'idle'} "
                         f"tick={getattr(current_state, 'tick', None)} "
                         f"confirmed={self.executor.confirmed_actions} "
-                        f"pending={len(self.executor.pending)} matches={match_count}"
+                        f"pending={len(self.executor.pending)} "
+                        f"ack_watch={len(self.executor.ack_watch)} matches={match_count}"
                     )
                 elif name == 'recover':
                     if lifecycle is None:
@@ -652,6 +653,7 @@ class CustomCardDeployAgent:
                         time.sleep(.001)
                         continue
                     if (auto_emotes and lifecycle is not None and not self.executor.pending
+                            and not self.executor.ack_watch
                             and self.executor.future is None and time.monotonic() >= next_emote_at):
                         try:
                             lifecycle.send_emote(random.randrange(8))
@@ -689,11 +691,11 @@ class CustomCardDeployAgent:
                     if paused or pending_model is not None:
                         time.sleep(.01)
                         continue
-                    # Do not infer against a state that is about to be
-                    # invalidated by the previous card input.  Input is
-                    # strictly serial; policy decisions must be serial too,
-                    # otherwise a queued decision can be based on the old
-                    # hand/elixir and become suboptimal after rotation.
+                    # Touch input remains strictly serial, but ACK
+                    # reconciliation is background work. Once the touch worker
+                    # completes, ack_watch keeps the old slot/cost protected
+                    # while policy may react with another legal slot on a
+                    # fresh authoritative frame.
                     if (state.tick >= FIRST_POLICY_DECISION_TICK
                             and state.tick >= last_decision_tick + config.DECISION_TICKS
                             and not self.executor.pending
