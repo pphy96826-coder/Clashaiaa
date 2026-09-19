@@ -397,6 +397,7 @@ class ActionExecutor:
             'soft_expires_at': soft_expires_at,
             'hard_expires_at': hard_expires_at,
             'extension_logged': False,
+            'stale_logged': False,
         }
         self.log('slot_consume_guard_started',
                  command_seq=pending.command_seq,
@@ -439,14 +440,23 @@ class ActionExecutor:
                              remaining_ms=round(
                                  max(0.0, float(guard['hard_expires_at']) - now) * 1000))
                 continue
-            del self.slot_consume_guards[slot]
+            # The positive ACK proved the card was consumed even though the
+            # hand snapshot is still stale. Never reopen that exact native
+            # slot/card until authoritative rotation; otherwise the policy can
+            # replay an impossible stale card.  Only the extra virtual spend
+            # reservation is bounded so unrelated slots can keep using the
+            # live elixir value after a generous reconciliation window.
             self._clear_spend(int(guard['command_seq']))
-            self.log('slot_consume_guard_cleared',
-                     command_seq=guard['command_seq'],
-                     card=card_id,
-                     slot=slot,
-                     evidence=guard['evidence'],
-                     reason='stale_hand_timeout')
+            if not guard.get('stale_logged'):
+                guard['stale_logged'] = True
+                self.log('slot_consume_guard_stale',
+                         command_seq=guard['command_seq'],
+                         card=card_id,
+                         slot=slot,
+                         evidence=guard['evidence'],
+                         age_ms=round(
+                             config.SLOT_CONSUME_GUARD_MAX_SECONDS * 1000),
+                         slot_remains_blocked=True)
 
     def blocked_slots(self, state):
         blocked = {p.action.hand_slot for p in (*self.pending, *self.ack_watch, *self.spawn_watch)
@@ -504,6 +514,7 @@ class ActionExecutor:
         active_seqs.update(
             int(guard['command_seq'])
             for guard in self.slot_consume_guards.values()
+            if now < float(guard['hard_expires_at'])
         )
         self.unconfirmed_spend[:] = [
             row for row in self.unconfirmed_spend
