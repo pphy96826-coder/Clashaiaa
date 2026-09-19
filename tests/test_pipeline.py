@@ -260,6 +260,73 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.hand_slots[2])
         self.assertIsNone(o.action_mask.reasons['attack_hold_reason'])
 
+    def test_surviving_support_opens_counterpush_phase_and_hog_lane(self):
+        a, s = self.adapter()
+        s.entities.append({
+            'id': 9201,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 14500,
+            'y': 12000,
+            'hp': 700,
+            'max_hp': 1000,
+        })
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'counterpush')
+        self.assertEqual(o.action_mask.reasons['counterpush_lane'], 'right')
+        self.assertEqual(o.action_mask.reasons['counterpush_support_entity_id'], 9201)
+        hog = o.action_mask.placement_masks['2']
+        self.assertFalse(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
+        self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
+
+    def test_near_tower_pressure_blocks_counterpush_phase(self):
+        a, s = self.adapter()
+        s.elixir = 9.0
+        s.entities.append({
+            'id': 9202,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 14500,
+            'y': 12000,
+            'hp': 700,
+            'max_hp': 1000,
+        })
+        add_enemy(s, 9203, 14500, 11000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertIsNone(o.action_mask.reasons['counterpush_lane'])
+        # At high elixir Hog is still legal; the defend phase simply prevents
+        # the support-lane counterpush bias from activating prematurely.
+        self.assertTrue(o.action_mask.hand_slots[2])
+
+    def test_split_surviving_support_does_not_force_hog_lane(self):
+        a, s = self.adapter()
+        for entity_id, x in ((9204, 3500), (9205, 14500)):
+            s.entities.append({
+                'id': entity_id,
+                'owner': s.local_owner,
+                'card_id': 26000014,
+                'x': x,
+                'y': 12000,
+                'hp': 700,
+                'max_hp': 1000,
+            })
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertIsNone(o.action_mask.reasons['counterpush_lane'])
+        hog = o.action_mask.placement_masks['2']
+        self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
+        self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
+
     def test_missing_initial_towers_do_not_open_pockets(self):
         s = state()
         s.entities.pop()
