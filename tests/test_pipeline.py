@@ -979,6 +979,129 @@ class ExecutorTests(unittest.TestCase):
                    if event == 'action_rejected']
         self.assertIn('slot_changed_or_locked', reasons)
 
+    def test_elixir_ack_guards_same_slot_until_authoritative_hand_rotation(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = now - 0.10
+        pending.input_completed_at = now - 0.05
+        pending.prior_elixir = s.elixir
+        self.executor.ack_watch.append(pending)
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq))
+
+        s.tick += 1
+        s.received_at = now + 0.01
+        s.elixir = pending.prior_elixir - pending.cost
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        self.assertIn(0, self.executor.blocked_slots(s))
+        self.assertEqual(self.executor.reserved_elixir, 0)
+        guards = self.executor.slot_consume_guards
+        self.assertEqual(guards[0]['command_seq'], pending.command_seq)
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(acks[-1]['evidence'], 'elixir_cost_drop')
+
+        # A repeated decision from the still-stale hand must not requeue the
+        # same slot/card even though the weak ACK was accepted.
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        self.assertFalse(self.executor.pending)
+        reasons = [data.get('reason') for event, data in self.events
+                   if event == 'action_rejected']
+        self.assertIn('slot_changed_or_locked', reasons)
+
+        # Once the native hand actually rotates, the guard disappears.
+        s.hand_cards[0] = s.hand_cards[1]
+        s.tick += 1
+        self.assertNotIn(0, self.executor.blocked_slots(s))
+        self.assertFalse(self.executor.slot_consume_guards)
+
+    def test_spawn_ack_keeps_virtual_spend_until_hand_rotation(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = now - 0.10
+        pending.input_completed_at = now - 0.05
+        pending.prior_elixir = s.elixir
+        pending.prior_entities = frozenset(e['id'] for e in s.entities)
+        self.executor.ack_watch.append(pending)
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq))
+
+        target_x, target_y = action_world(first)
+        s.entities.append({
+            'id': 9901,
+            'owner': s.local_owner,
+            'card_id': first.card_id,
+            'x': target_x,
+            'y': target_y,
+            'hp': 100,
+            'max_hp': 100,
+        })
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        self.assertIn(0, self.executor.blocked_slots(s))
+        self.assertEqual(self.executor.reserved_elixir, pending.cost)
+
+        s.hand_cards[0] = s.hand_cards[1]
+        s.tick += 1
+        self.executor.blocked_slots(s)
+        self.assertEqual(self.executor.reserved_elixir, 0)
+
+    def test_prior_weak_ack_disables_new_elixir_only_attribution(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        p1 = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        p1.state = 'sent'
+        p1.sent_tick = s.tick
+        p1.sent_at = now - 0.10
+        p1.input_completed_at = now - 0.05
+        p1.prior_elixir = s.elixir
+        self.executor.ack_watch.append(p1)
+
+        s.tick += 1
+        s.received_at = now + 0.01
+        s.elixir = p1.prior_elixir - p1.cost
+        self.executor.poll(s, lambda *_: True)
+        self.assertIn(0, self.executor.slot_consume_guards)
+
+        second = play(slot=1, card=s.hand_cards[1])
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        p2 = self.executor.pending.pop(0)
+        p2.state = 'sent'
+        p2.sent_tick = s.tick
+        p2.sent_at = now
+        p2.input_completed_at = now + 0.01
+        p2.prior_elixir = s.elixir
+        self.executor.ack_watch.append(p2)
+
+        # The aggregate resource drop is large enough for p2, but p1 still
+        # lacks authoritative hand rotation, so it cannot be uniquely
+        # attributed to this newer command.
+        s.tick += 1
+        s.received_at = now + 0.02
+        s.elixir = p2.prior_elixir - p2.cost
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(self.executor.ack_watch, [p2])
+        acks = [data for event, data in self.events
+                if event == 'hand_ack' and data['command_seq'] == p2.command_seq]
+        self.assertFalse(acks)
+
     def test_multiple_ack_watches_do_not_use_elixir_fallback(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
