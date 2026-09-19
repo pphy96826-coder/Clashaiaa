@@ -66,10 +66,14 @@ class HeroExecutionTests(unittest.TestCase):
         self.executor.future.result(timeout=2)
         self.actuator.activate_ability.assert_called_once()
         self.actuator.deploy_action.assert_not_called()
+        # The executor records input_completed_at and moves the sent action
+        # into ack_watch only on the next poll. Reconcile once with the same
+        # pre-input snapshot; that frame must not be allowed to ACK the skill.
+        self.executor.poll(self.state, lambda a,s: True)
+        self.assertEqual(len(self.executor.ack_watch), 1)
         self.raw['players'][0]['ability_runtime'][0].update(charges=0, button_state=6)
         self.state.tick += 1
-        # ACK reconciliation intentionally rejects the pre-input snapshot.
-        # Model a genuinely newer probe frame, as production does.
+        # Now model the genuinely newer authoritative probe frame.
         self.state.received_at = time.perf_counter()
         self.executor.poll(self.state, lambda a,s: True)
         self.assertFalse(self.executor.pending)
@@ -84,6 +88,10 @@ class HeroExecutionTests(unittest.TestCase):
         self.executor.submit(SimpleNamespace(actions=(self.action,)), self.state)
         self.executor.poll(self.state, lambda a,s: True)
         self.executor.future.result(timeout=2)
+        # First reconcile input completion with the unchanged pre-input
+        # snapshot so the sent action is transferred to ack_watch.
+        self.executor.poll(self.state, lambda a,s: True)
+        self.assertEqual(len(self.executor.ack_watch), 1)
         self.raw['players'][0]['ability_runtime'][0].update(members=[5000041], charges=0)
         # Ability ACK timeout starts when the Android input transaction
         # completes, not when it was submitted. Age that exact clock and
