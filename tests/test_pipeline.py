@@ -1269,6 +1269,43 @@ class ExecutorTests(unittest.TestCase):
         self.executor.blocked_slots(s)
         self.assertEqual(self.executor.reserved_elixir, 0)
 
+    def test_prior_unresolved_spend_disables_new_elixir_only_attribution(self):
+        s = state()
+        now = time.perf_counter()
+
+        # Command 77 has already left ACK watch (for example after an
+        # ambiguous timeout) but its short safety reservation is still live.
+        self.executor.unconfirmed_spend.append((now, 4.0, 77))
+
+        second = play(slot=1, card=s.hand_cards[1])
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        p2 = self.executor.pending.pop(0)
+        p2.state = 'sent'
+        p2.sent_tick = s.tick
+        p2.sent_at = now - 0.05
+        p2.input_completed_at = now - 0.02
+        p2.prior_elixir = s.elixir
+        p2.ack_timeout_seconds = config.CARD_ACK_TIMEOUT_BASE_SECONDS
+        self.executor.ack_watch.append(p2)
+        self.executor.unconfirmed_spend.append(
+            (now, p2.cost, p2.command_seq)
+        )
+
+        # This aggregate drop is large enough to look like p2's spend, but the
+        # older unresolved reservation means resource telemetry cannot prove
+        # which command caused it.
+        s.tick += 1
+        s.received_at = now + 0.01
+        s.elixir = p2.prior_elixir - p2.cost
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(self.executor.ack_watch, [p2])
+        acks = [
+            data for event, data in self.events
+            if event == 'hand_ack' and data['command_seq'] == p2.command_seq
+        ]
+        self.assertFalse(acks)
+
     def test_prior_weak_ack_disables_new_elixir_only_attribution(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
