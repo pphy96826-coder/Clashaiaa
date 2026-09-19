@@ -546,9 +546,11 @@ class ActionExecutor:
             return
         if now is None:
             now = time.perf_counter()
+        self._apply_slot_hand_overrides(state)
         for slot, guard in list(self.slot_consume_guards.items()):
             card_id = int(guard['card_id'])
-            rotated = state.hand_cards[slot] != card_id
+            raw_card = self._raw_hand_card(state, slot)
+            rotated = raw_card is not None and int(raw_card) != card_id
             soft_expired = now >= float(guard['soft_expires_at'])
             hard_expired = now >= float(guard['hard_expires_at'])
             if rotated:
@@ -561,6 +563,14 @@ class ActionExecutor:
                          evidence=guard['evidence'],
                          reason='hand_rotation')
                 continue
+            inferred = self._infer_slot_card_from_cycle(state, slot)
+            if inferred is not None and inferred != card_id:
+                del self.slot_consume_guards[slot]
+                self._clear_spend(int(guard['command_seq']))
+                if self._recover_slot_override(
+                        state, slot, card_id, guard['command_seq'],
+                        replacement_card=inferred):
+                    continue
             if not soft_expired:
                 continue
             if not hard_expired:
@@ -598,6 +608,10 @@ class ActionExecutor:
         now = time.perf_counter()
         self._prune_slot_consume_guards(state, now)
         blocked.update(self.slot_consume_guards)
+        blocked.update(
+            slot for slot, override in self.slot_hand_overrides.items()
+            if not override.get('valid')
+        )
         for slot, (card, until) in list(self.cooldowns.items()):
             if state.hand_cards[slot] != card or now >= until:
                 del self.cooldowns[slot]
