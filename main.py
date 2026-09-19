@@ -746,6 +746,9 @@ class CustomCardDeployAgent:
                         if not waiting:
                             self.log('decision', tick=state.tick, inference_ms=inference_ms,
                                 pipeline_ms=(time.perf_counter()-pipeline_start)*1000,
+                                probe_query_ms=self.probe.last_query_ms,
+                                frame_to_policy_start_ms=max(
+                                    0.0, (pipeline_start-state.received_at)*1000),
                                 tick_gap=None if last_decision_tick < 0 else state.tick-last_decision_tick,
                                 simulation_used=simulation_entities is not None,
                                 simulation_entity_count=(len(simulation_entities)
