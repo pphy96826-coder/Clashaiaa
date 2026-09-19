@@ -1102,6 +1102,52 @@ class ExecutorTests(unittest.TestCase):
         self.assertLessEqual(timeout, config.CARD_ACK_TIMEOUT_MAX_SECONDS)
         self.assertGreaterEqual(timeout, 1.14)
 
+    def test_sent_action_cost_is_reserved_once_not_twice(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+
+        self.assertEqual(self.executor.reserved_elixir, pending.cost)
+
+        pending.state = 'sent'
+        now = time.perf_counter()
+        pending.sent_at = now
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq)
+        )
+
+        # Sent actions move their cost from queued reservation ownership to
+        # unconfirmed_spend; they must not be counted by both containers.
+        self.assertEqual(self.executor.reserved_elixir, pending.cost)
+
+    def test_ack_watch_keeps_spend_reserved_past_age_ttl(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = now - config.ELIXIR_RESERVATION_SECONDS - 0.5
+        pending.input_completed_at = now - 0.9
+        pending.ack_timeout_seconds = config.CARD_ACK_TIMEOUT_MAX_SECONDS
+        self.executor.ack_watch.append(pending)
+        self.executor.unconfirmed_spend.append(
+            (pending.sent_at, pending.cost, pending.command_seq)
+        )
+
+        self.executor._prune_unconfirmed_spend(now)
+
+        # The old timestamp alone must not release spend while ACK ownership
+        # is still active under the longer adaptive card timeout.
+        self.assertEqual(self.executor.reserved_elixir, pending.cost)
+        self.assertEqual(len(self.executor.unconfirmed_spend), 1)
+
+        self.executor.ack_watch.clear()
+        self.executor._prune_unconfirmed_spend(now)
+        self.assertEqual(self.executor.reserved_elixir, 0)
+        self.assertFalse(self.executor.unconfirmed_spend)
+
     def test_completed_input_ack_watch_allows_different_slot(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
