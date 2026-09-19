@@ -48,6 +48,10 @@ class ThreatReservation:
     target: tuple[float, float]
     expires_at: float
     confidence: str = 'confirmed'
+    reaction_started_at: float = 0.0
+    suppress_until: float = 0.0
+    baseline_count: int = 0
+    baseline_hp: float = 0.0
 
 
 class ActionExecutor:
@@ -70,16 +74,17 @@ class ActionExecutor:
     # runtime card identity; unrelated push units remain independently
     # defendable.
     THREAT_COHORT_RADIUS_WORLD = 2800.0
-    # Provisional protection must bridge the entire hand-ACK window. Otherwise
-    # a slow hand frame opens a gap between input completion and confirmed
-    # reservation where a second card can be committed to the same threat.
+    # Keep a short reaction-pending window after Android input completion.
+    # During this window the next policy frame must not answer the same cohort
+    # again just because the spell/troop effect has not rendered yet. After a
+    # genuinely newer probe frame and this delay, the residual threat is
+    # re-evaluated instead of being hard-blocked until every body disappears.
+    THREAT_REACTION_HOLD_SECONDS = 0.50
+    THREAT_RESIDUAL_RELEASE_RATIO = 0.55
+    # Keep the reservation row alive through slow hand ACK telemetry, but note
+    # that expires_at is only bookkeeping. Suppression after the reaction hold
+    # is decided from residual threat, not from this long TTL.
     THREAT_PROVISIONAL_ACK_GRACE_SECONDS = 0.30
-    # Spells have no durable own spawn to make their effect immediately
-    # visible. Keep the local threat reserved slightly longer after a confirmed
-    # spell consume; the reservation still disappears immediately when every
-    # bound enemy body is gone.
-    SPELL_THREAT_RESERVATION_CONFIRMED_SECONDS = 1.35
-    SPELL_THREAT_RESERVATION_UNCERTAIN_SECONDS = 1.10
 
     def __init__(self, actuator, log, dry_run=False, on_ability_ack=None, max_actions=None):
         self.actuator, self.log, self.dry_run = actuator, log, dry_run
@@ -378,6 +383,52 @@ class ActionExecutor:
             and bool(reservation.threat_ids & live_ids)
         ]
 
+    @staticmethod
+    def _threat_metrics(state, threat_ids):
+        rows = [
+            entity for entity in state.entities
+            if entity.get('id') in threat_ids
+            and isinstance(entity.get('hp'), (int, float))
+            and entity.get('hp') > 0
+        ]
+        return len(rows), sum(float(entity['hp']) for entity in rows)
+
+    def _reservation_still_suppresses(self, reservation, state, now):
+        # Never judge the result from the same snapshot that existed before the
+        # input transaction completed, and always give the reaction a short
+        # render/impact window.
+        received_at = float(getattr(state, 'received_at', 0.0) or 0.0)
+        if (received_at <= reservation.reaction_started_at
+                or now < reservation.suppress_until):
+            return True, 'reaction_pending', 1.0
+
+        count, hp = self._threat_metrics(state, reservation.threat_ids)
+        if count <= 0:
+            return False, 'cohort_cleared', 0.0
+
+        if reservation.baseline_count <= 1:
+            residual_ratio = (
+                hp / reservation.baseline_hp
+                if reservation.baseline_hp > 0 else 1.0
+            )
+        else:
+            count_ratio = count / max(1, reservation.baseline_count)
+            hp_ratio = (
+                hp / reservation.baseline_hp
+                if reservation.baseline_hp > 0 else count_ratio
+            )
+            # Multiple surviving bodies can still threaten a tower even when
+            # each has lost substantial HP, so preserve the larger signal.
+            residual_ratio = max(count_ratio, hp_ratio)
+
+        return (
+            residual_ratio < self.THREAT_RESIDUAL_RELEASE_RATIO,
+            'residual_mostly_handled'
+            if residual_ratio < self.THREAT_RESIDUAL_RELEASE_RATIO
+            else 'residual_still_dangerous',
+            residual_ratio,
+        )
+
     def _matching_threat_reservation(self, action, state):
         now = time.perf_counter()
         self._prune_threat_reservations(state, now)
@@ -385,9 +436,28 @@ class ActionExecutor:
         if not threat_ids:
             return None, threat_ids
         for reservation in reversed(self.threat_reservations):
-            if (reservation.owner == action.owner
-                    and bool(threat_ids & reservation.threat_ids)):
+            if (reservation.owner != action.owner
+                    or not bool(threat_ids & reservation.threat_ids)):
+                continue
+            suppress, reason, residual_ratio = (
+                self._reservation_still_suppresses(
+                    reservation, state, now))
+            if suppress:
                 return reservation, threat_ids
+            # The first answer has had time to take effect and a newer frame
+            # still shows a substantial residual threat. Let the policy's
+            # newly computed defensive action through instead of treating the
+            # whole cohort as permanently solved.
+            self.threat_reservations.remove(reservation)
+            self.log(
+                'threat_reservation_recheck_released',
+                command_seq=reservation.command_seq,
+                card=reservation.card_id,
+                threat_ids=sorted(reservation.threat_ids),
+                reason=reason,
+                residual_ratio=round(residual_ratio, 3),
+            )
+            return None, threat_ids
         return None, threat_ids
 
     def _commit_threat_reservation(self, pending, state, now, *, confidence='confirmed'):
@@ -414,22 +484,27 @@ class ActionExecutor:
                 ack_budget + self.THREAT_PROVISIONAL_ACK_GRACE_SECONDS,
             )
 
-        # Spell effects are visible later than card consumption and do not
-        # provide an own spawned unit as immediate evidence. Give them a
-        # longer local outcome window, while still pruning as soon as the
-        # reserved enemy cohort is actually gone.
-        card_family = int(pending.action.card_id or 0) // 1_000_000
-        if card_family == 28:
-            if confidence == 'confirmed':
-                ttl = max(
-                    ttl,
-                    self.SPELL_THREAT_RESERVATION_CONFIRMED_SECONDS,
-                )
-            elif confidence == 'uncertain':
-                ttl = max(
-                    ttl,
-                    self.SPELL_THREAT_RESERVATION_UNCERTAIN_SECONDS,
-                )
+        existing = next((
+            row for row in self.threat_reservations
+            if row.command_seq == pending.command_seq
+        ), None)
+        if existing is not None:
+            reaction_started_at = existing.reaction_started_at
+            suppress_until = existing.suppress_until
+            baseline_count = existing.baseline_count
+            baseline_hp = existing.baseline_hp
+        else:
+            reaction_started_at = float(
+                getattr(pending, 'input_completed_at', 0.0)
+                or getattr(pending, 'sent_at', 0.0)
+                or now
+            )
+            suppress_until = (
+                reaction_started_at + self.THREAT_REACTION_HOLD_SECONDS
+            )
+            baseline_count, baseline_hp = self._threat_metrics(
+                state, threat_ids)
+
         reservation = ThreatReservation(
             command_seq=pending.command_seq,
             owner=int(pending.action.owner),
@@ -438,6 +513,10 @@ class ActionExecutor:
             target=pending.threat_target,
             expires_at=now + ttl,
             confidence=confidence,
+            reaction_started_at=reaction_started_at,
+            suppress_until=suppress_until,
+            baseline_count=baseline_count,
+            baseline_hp=baseline_hp,
         )
         self.threat_reservations[:] = [
             row for row in self.threat_reservations
@@ -450,7 +529,11 @@ class ActionExecutor:
                  threat_ids=sorted(threat_ids),
                  target_world=list(pending.threat_target),
                  confidence=confidence,
-                 ttl_ms=round(ttl * 1000))
+                 ttl_ms=round(ttl * 1000),
+                 suppress_ms=max(
+                     0, round((suppress_until - now) * 1000)),
+                 baseline_count=baseline_count,
+                 baseline_hp=round(baseline_hp, 1))
         return True
 
     def pause(self):
