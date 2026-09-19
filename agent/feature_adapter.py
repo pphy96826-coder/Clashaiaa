@@ -133,6 +133,8 @@ class FeatureAdapter:
         self._effects_by_entity = {}
         self._active_enemy_buildings = {}
         self._recent_enemy_building_expiry = None
+        self._opponent_exact_play_count = 0
+        self._opponent_last_play_count = {}
 
     def _effect_provenance(self, semantic, entity_id):
         if not self._effects_by_entity.get(entity_id, ((), False))[1]:
@@ -222,6 +224,13 @@ class FeatureAdapter:
                     self._events.append(EventV1(tick=state.tick, event_type='action_executed', owner=owner,
                         card_id=old, data={'kind': 'play_card', 'hand_slot': slot,
                         'evidence': 'native_hand_transition', 'cost': self.bundle.card_specs[old].elixir_cost}))
+                    if owner != self.actor_owner:
+                        # Exact public play order: count only cards whose play is
+                        # proven by the native hand transition. This is enough
+                        # to reason about the four-card return rule without
+                        # peeking at the opponent's current hidden hand.
+                        self._opponent_exact_play_count += 1
+                        self._opponent_last_play_count[int(old)] = self._opponent_exact_play_count
             self._previous_hands[owner] = hand
         # Track only public opponent building lifecycle. A building becoming
         # visible is public board state; its disappearance starts a short,
@@ -661,6 +670,32 @@ class FeatureAdapter:
             'entity_id': int(row['entity_id']),
             'age_ticks': age,
             'remaining_ticks': RECENT_BUILDING_ATTACK_WINDOW_TICKS - age,
+        }
+
+    def _exact_building_cycle_window(self, defensive_pressure=False):
+        """Return a proven building-out-of-cycle window from exact play receipts.
+
+        Clash Royale returns a played card after four subsequent card plays.
+        We only use native hand-transition receipts already accepted by the
+        public tracker. If those receipts are unavailable, this function stays
+        silent rather than inferring hidden hand state from spawned units.
+        """
+        if defensive_pressure or not self._recent_enemy_building_expiry:
+            return None
+        cid = int(self._recent_enemy_building_expiry['card_id'])
+        last_play = self._opponent_last_play_count.get(cid)
+        if last_play is None:
+            return None
+        plays_since = self._opponent_exact_play_count - int(last_play)
+        if plays_since < 0 or plays_since >= 4:
+            return None
+        if cid in self._active_enemy_buildings.values():
+            return None
+        return {
+            'reason': 'enemy_building_out_of_cycle',
+            'card_id': cid,
+            'plays_since': plays_since,
+            'plays_until_return': 4 - plays_since,
         }
 
     @staticmethod
@@ -1147,8 +1182,13 @@ class FeatureAdapter:
             strategy_phase == 'neutral'
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
         )
-        building_attack_window = self._recent_building_attack_window(
-            state.tick, defensive_pressure=defensive_pressure)
+        exact_building_cycle_window = self._exact_building_cycle_window(
+            defensive_pressure=defensive_pressure)
+        building_attack_window = (
+            exact_building_cycle_window
+            or self._recent_building_attack_window(
+                state.tick, defensive_pressure=defensive_pressure)
+        )
         low_elixir_attack_window = self._low_elixir_attack_window(
             elixir, opponent_elixir_bounds,
             defensive_pressure=defensive_pressure)
@@ -1168,8 +1208,13 @@ class FeatureAdapter:
         self.quality['attack_window_card_id'] = (
             building_attack_window['card_id'] if building_attack_window else None)
         self.quality['attack_window_age_ticks'] = (
-            building_attack_window['age_ticks'] if building_attack_window else None)
+            building_attack_window.get('age_ticks') if building_attack_window else None)
+        self.quality['attack_window_plays_since'] = (
+            building_attack_window.get('plays_since') if building_attack_window else None)
+        self.quality['attack_window_plays_until_return'] = (
+            building_attack_window.get('plays_until_return') if building_attack_window else None)
         self.quality['active_enemy_building_count'] = len(self._active_enemy_buildings)
+        self.quality['opponent_exact_play_count'] = self._opponent_exact_play_count
         for slot, cid in slots.items():
             spec = self.bundle.card_specs[cid]
             if selections is not None:
@@ -1256,8 +1301,13 @@ class FeatureAdapter:
                      'attack_window_card_id': (
                          building_attack_window['card_id'] if building_attack_window else None),
                      'attack_window_age_ticks': (
-                         building_attack_window['age_ticks'] if building_attack_window else None),
+                         building_attack_window.get('age_ticks') if building_attack_window else None),
+                     'attack_window_plays_since': (
+                         building_attack_window.get('plays_since') if building_attack_window else None),
+                     'attack_window_plays_until_return': (
+                         building_attack_window.get('plays_until_return') if building_attack_window else None),
                      'active_enemy_building_count': len(self._active_enemy_buildings),
+                     'opponent_exact_play_count': self._opponent_exact_play_count,
                      'opponent_elixir_lower': (
                          opponent_elixir_bounds[0] if opponent_elixir_bounds else None),
                      'opponent_elixir_upper': (
