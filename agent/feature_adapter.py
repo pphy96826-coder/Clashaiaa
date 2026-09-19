@@ -40,6 +40,8 @@ from bridge.reference_events import ReferenceEvents
 
 HOG_26_DECK = (26000010, 26000014, 26000021, 26000030, 26000038, 27000000, 28000000, 28000011)
 HOG_RIDER = 26000021
+ICE_SPIRIT = 26000030
+ICE_GOLEM = 26000038
 CANNON = 27000000
 FIREBALL = 28000000
 MINER = 26000032
@@ -62,10 +64,19 @@ INCOMING_PUSH_PLAY_BIND_TICKS = 16
 INCOMING_PUSH_RECENT_HEAVY_TICKS = 30
 INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH = 14000.0
 HEAVY_DEFEND_CANNON_RELEASE_DEPTH = 11500.0
+HEAVY_DEFEND_BODY_RELEASE_DEPTH = 14500.0
 HEAVY_DEFEND_CANNON_MIN_DEPTH = 4500.0
 HEAVY_DEFEND_CANNON_MAX_DEPTH = 11500.0
 HEAVY_DEFEND_MUSKETEER_MAX_DEPTH = 9500.0
+HEAVY_DEFEND_ICE_GOLEM_MIN_DEPTH = 5000.0
+HEAVY_DEFEND_ICE_GOLEM_MAX_DEPTH = 12500.0
+HEAVY_DEFEND_CHEAP_MIN_DEPTH = 5500.0
+HEAVY_DEFEND_CHEAP_MAX_DEPTH = 14000.0
+HEAVY_DEFEND_FIREBALL_CLUSTER_RADIUS = 5000.0
+HEAVY_DEFEND_FIREBALL_SUPPORT_MIN_COST = 3.0
+HEAVY_DEFEND_FIREBALL_TARGET_RADIUS = 5500.0
 INCOMING_PUSH_CORE_DEFENDERS = frozenset((MUSKETEER, CANNON))
+HEAVY_DEFEND_CHEAP_CONTROL = frozenset((SKELETONS, ICE_SPIRIT))
 INCOMING_PUSH_HARD_RESERVE_CARDS = frozenset((FIREBALL,))
 
 # Conservative impact envelopes in native world units.  They are deliberately
@@ -1117,27 +1128,118 @@ class FeatureAdapter:
         return masked
 
     def _mask_to_heavy_defense_role(self, entry, card_id, lane):
-        """Stage core defenders for a tracked heavy push.
-
-        The heavy core lane wins over a transient opposite-lane distractor for
-        Musketeer/Cannon.  Musketeer stays behind the fight; Cannon stays in a
-        compact pull/anchor band instead of being dropped at the bridge or
-        buried on the baseline.
-        """
+        """Stage defenders for a tracked heavy push."""
         masked = self._mask_to_lane(entry, lane, 'heavy_defense_lane')
-        if int(card_id) == MUSKETEER:
+        cid = int(card_id)
+        if cid == MUSKETEER:
             return self._mask_to_defensive_depth_band(
                 masked,
                 max_depth=HEAVY_DEFEND_MUSKETEER_MAX_DEPTH,
                 metadata_prefix='heavy_defense_musketeer',
             )
-        if int(card_id) == CANNON:
+        if cid == CANNON:
             return self._mask_to_defensive_depth_band(
                 masked,
                 min_depth=HEAVY_DEFEND_CANNON_MIN_DEPTH,
                 max_depth=HEAVY_DEFEND_CANNON_MAX_DEPTH,
                 metadata_prefix='heavy_defense_cannon',
             )
+        if cid == ICE_GOLEM:
+            return self._mask_to_defensive_depth_band(
+                masked,
+                min_depth=HEAVY_DEFEND_ICE_GOLEM_MIN_DEPTH,
+                max_depth=HEAVY_DEFEND_ICE_GOLEM_MAX_DEPTH,
+                metadata_prefix='heavy_defense_ice_golem',
+            )
+        if cid in HEAVY_DEFEND_CHEAP_CONTROL:
+            return self._mask_to_defensive_depth_band(
+                masked,
+                min_depth=HEAVY_DEFEND_CHEAP_MIN_DEPTH,
+                max_depth=HEAVY_DEFEND_CHEAP_MAX_DEPTH,
+                metadata_prefix='heavy_defense_cheap',
+            )
+        return masked
+
+    def _heavy_defense_fireball_context(self, incoming_push):
+        """Return visible support value near a tracked heavy core.
+
+        Fireball stays reserved against a lone tank. It becomes available when
+        a visible same-lane support package is close enough that a defensive
+        Fireball can hit the push rather than being spent elsewhere.
+        """
+        if incoming_push is None:
+            return None
+        core_id = incoming_push.get('core_entity_id')
+        lane = incoming_push.get('lane')
+        core = self._live_entities.get(core_id)
+        if core is None or lane is None:
+            return None
+        cx, cy = float(core['x']), float(core['y'])
+        support = []
+        support_cost = 0.0
+        for eid, ent in self._live_entities.items():
+            if int(eid) == int(core_id):
+                continue
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+            x, y = float(ent['x']), float(ent['y'])
+            ent_lane = 'left' if x < 9000.0 else 'right'
+            if ent_lane != lane:
+                continue
+            if math.hypot(x - cx, y - cy) > HEAVY_DEFEND_FIREBALL_CLUSTER_RADIUS:
+                continue
+            spec = self.bundle.card_specs.get(int(ent.get('card_id', -1)))
+            cost = float(spec.elixir_cost) if spec is not None else 0.0
+            if cost <= 0.0:
+                continue
+            support.append({
+                'entity_id': int(eid),
+                'card_id': int(ent.get('card_id', -1)),
+                'cost': cost,
+                'x': x,
+                'y': y,
+            })
+            support_cost += cost
+        if support_cost < HEAVY_DEFEND_FIREBALL_SUPPORT_MIN_COST:
+            return {
+                'release': False,
+                'support_count': len(support),
+                'support_cost': support_cost,
+                'core_x': cx,
+                'core_y': cy,
+            }
+        return {
+            'release': True,
+            'support_count': len(support),
+            'support_cost': support_cost,
+            'core_x': cx,
+            'core_y': cy,
+        }
+
+    @staticmethod
+    def _mask_spell_near_point(entry, world_x, world_y, radius, metadata_prefix):
+        masked = dict(entry)
+        subcell = masked.get('model_subcell_offset') or (0.0, 0.0)
+        dx, dy = float(subcell[0] or 0.0), float(subcell[1] or 0.0)
+        rows = []
+        for y, row in enumerate(masked['row_major']):
+            out = []
+            for x, allowed in enumerate(row):
+                gx = (float(x) + 0.5 + dx) * 1000.0
+                gy = (float(y) + 0.5 + dy) * 1000.0
+                out.append(
+                    bool(allowed)
+                    and math.hypot(gx - float(world_x), gy - float(world_y))
+                    <= float(radius)
+                )
+            rows.append(tuple(out))
+        masked['row_major'] = tuple(rows)
+        masked[f'{metadata_prefix}_target_x'] = float(world_x)
+        masked[f'{metadata_prefix}_target_y'] = float(world_y)
+        masked[f'{metadata_prefix}_target_radius'] = float(radius)
         return masked
 
     def defensive_lane_conflict(self, action, state):
@@ -1524,6 +1626,10 @@ class FeatureAdapter:
             and incoming_push.get('core_depth') is not None
             else None
         )
+        heavy_fireball = (
+            self._heavy_defense_fireball_context(incoming_push)
+            if defending_incoming_push else None
+        )
         neutral_patience = (
             strategy_phase == 'neutral'
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
@@ -1602,6 +1708,17 @@ class FeatureAdapter:
             and heavy_core_depth is not None
             and heavy_core_depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH
         )
+        self.quality['heavy_defend_ice_golem_held'] = bool(
+            defending_incoming_push
+            and heavy_core_depth is not None
+            and heavy_core_depth > HEAVY_DEFEND_BODY_RELEASE_DEPTH
+        )
+        self.quality['heavy_defend_fireball_released'] = bool(
+            heavy_fireball and heavy_fireball.get('release'))
+        self.quality['heavy_defend_fireball_support_count'] = (
+            heavy_fireball.get('support_count') if heavy_fireball else 0)
+        self.quality['heavy_defend_fireball_support_cost'] = (
+            heavy_fireball.get('support_cost') if heavy_fireball else 0.0)
         self.quality['incoming_push_hard_reserve_cards'] = (
             sorted(INCOMING_PUSH_HARD_RESERVE_CARDS)
             if preparing_for_push else []
@@ -1668,6 +1785,21 @@ class FeatureAdapter:
                     'strategy_hold_cannon_for_heavy_core'
                 )
                 continue
+            if (defending_incoming_push
+                    and cid == ICE_GOLEM
+                    and heavy_core_depth is not None
+                    and heavy_core_depth > HEAVY_DEFEND_BODY_RELEASE_DEPTH):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_ice_golem_for_heavy_core'
+                )
+                continue
+            if (defending_incoming_push
+                    and cid == FIREBALL
+                    and not (heavy_fireball and heavy_fireball.get('release'))):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_fireball_for_heavy_support'
+                )
+                continue
             if (preparing_for_push
                     and cid in INCOMING_PUSH_HARD_RESERVE_CARDS):
                 slot_reasons[str(slot)] = (
@@ -1692,7 +1824,13 @@ class FeatureAdapter:
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
                 ability_hud=ability_hud)
             if (defending_incoming_push
-                    and cid in INCOMING_PUSH_CORE_DEFENDERS):
+                    and cid in (INCOMING_PUSH_CORE_DEFENDERS | frozenset((ICE_GOLEM,)))):
+                entry = self._mask_to_heavy_defense_role(
+                    entry, cid, incoming_push['lane'])
+            elif (defending_incoming_push
+                    and cid in HEAVY_DEFEND_CHEAP_CONTROL
+                    and (defensive_lane_gate is None
+                         or defensive_lane_gate['threat_lane'] == incoming_push['lane'])):
                 entry = self._mask_to_heavy_defense_role(
                     entry, cid, incoming_push['lane'])
             elif defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
@@ -1708,6 +1846,17 @@ class FeatureAdapter:
                     and cid in INCOMING_PUSH_CORE_DEFENDERS):
                 entry = self._mask_to_lane(
                     entry, incoming_push['lane'], 'incoming_push_lane')
+            if (defending_incoming_push
+                    and cid == FIREBALL
+                    and heavy_fireball
+                    and heavy_fireball.get('release')):
+                entry = self._mask_spell_near_point(
+                    entry,
+                    heavy_fireball['core_x'],
+                    heavy_fireball['core_y'],
+                    HEAVY_DEFEND_FIREBALL_TARGET_RADIUS,
+                    'heavy_defense_fireball',
+                )
             if cid == HOG_RIDER and hog_opportunity_lane is not None:
                 entry = self._mask_to_lane(
                     entry, hog_opportunity_lane, 'attack_opportunity_lane')
@@ -1794,6 +1943,18 @@ class FeatureAdapter:
                          defending_incoming_push
                          and heavy_core_depth is not None
                          and heavy_core_depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH),
+                     'heavy_defend_ice_golem_held': bool(
+                         defending_incoming_push
+                         and heavy_core_depth is not None
+                         and heavy_core_depth > HEAVY_DEFEND_BODY_RELEASE_DEPTH),
+                     'heavy_defend_fireball_released': bool(
+                         heavy_fireball and heavy_fireball.get('release')),
+                     'heavy_defend_fireball_support_count': (
+                         heavy_fireball.get('support_count')
+                         if heavy_fireball else 0),
+                     'heavy_defend_fireball_support_cost': (
+                         heavy_fireball.get('support_cost')
+                         if heavy_fireball else 0.0),
                      'incoming_push_hard_reserve_cards': (
                          sorted(INCOMING_PUSH_HARD_RESERVE_CARDS)
                          if preparing_for_push else []),
