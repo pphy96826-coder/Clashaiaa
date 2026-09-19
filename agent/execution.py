@@ -443,12 +443,46 @@ class ActionExecutor:
 
     @property
     def reserved_elixir(self):
-        return sum(p.cost for p in (*self.pending, *self.spawn_watch)) + sum(
+        # Queued actions have not touched Android yet and therefore need an
+        # explicit reservation. Once an action is sent, its cost moves into
+        # unconfirmed_spend. Counting sent pending rows here as well would
+        # double-reserve the same card while the touch worker is still busy.
+        queued = sum(
+            p.cost for p in self.pending
+            if getattr(p, 'state', 'queued') == 'queued'
+        )
+        # spawn_watch is retained for legacy post-ACK observation tracking. If
+        # a row is ever present there without a matching spend reservation,
+        # keep its cost protected exactly once.
+        spend_seqs = {int(seq) for _, _, seq in self.unconfirmed_spend}
+        spawn_only = sum(
+            p.cost for p in self.spawn_watch
+            if int(p.command_seq) not in spend_seqs
+        )
+        return queued + spawn_only + sum(
             cost for _, cost, _ in self.unconfirmed_spend)
 
     def _prune_unconfirmed_spend(self, now):
-        self.unconfirmed_spend[:] = [row for row in self.unconfirmed_spend
-                                     if now - row[0] < config.ELIXIR_RESERVATION_SECONDS]
+        # Never let the age-based safety TTL expire while the command is still
+        # actively waiting for input completion/ACK/hand reconciliation.
+        # CARD_ACK_TIMEOUT_MAX_SECONDS can exceed the old reservation TTL once
+        # emulator/probe telemetry is slow, so age alone is no longer enough.
+        active_seqs = {
+            int(p.command_seq)
+            for p in (*self.pending, *self.ack_watch, *self.spawn_watch)
+            if getattr(p, 'state', 'queued') == 'sent'
+            or p in self.ack_watch
+            or p in self.spawn_watch
+        }
+        active_seqs.update(
+            int(guard['command_seq'])
+            for guard in self.slot_consume_guards.values()
+        )
+        self.unconfirmed_spend[:] = [
+            row for row in self.unconfirmed_spend
+            if int(row[2]) in active_seqs
+            or now - row[0] < config.ELIXIR_RESERVATION_SECONDS
+        ]
 
     def _clear_spend(self, command_seq):
         self.unconfirmed_spend[:] = [row for row in self.unconfirmed_spend
