@@ -10,7 +10,7 @@
   "ability_calibration.example.json": "98f8c6200c16495d324d487d84ecece181a3b36a0f2f0935d86b3b708950a951",
   "agent/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "agent/execution.py": "b1a87ccabe9861f695570724aa45cf8468ec35464e5c86b62ac56d9f114c4b99",
-  "agent/feature_adapter.py": "c0163ccb096d87acea7ff626cdaf1fff55692cff58ffbe47d36ee2a38da62e07",
+  "agent/feature_adapter.py": "4fe4f3b25d6f8126bff171d49f8cfc55d52cf41a42411c4f9295278454bb1bdc",
   "agent/policy_engine.py": "e86a7ab27dccdf9aeef25c0045c3679530cf1b642ad404421c3bcbb04bf8ea8d",
   "bridge/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "bridge/ability_state.py": "fa946dbb5315afecabb3ee9f309e59bccd9a1df338aa8193f703c6a1f0727fb7",
