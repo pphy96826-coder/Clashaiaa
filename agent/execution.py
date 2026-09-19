@@ -26,6 +26,7 @@ class PendingAction:
     prior_elixir: float | None = None
     decision_at: float = 0.0
     observation_received_at: float = 0.0
+    input_completed_at: float = 0.0
     threat_ids: frozenset = frozenset()
     threat_target: tuple[float, float] | None = None
 
@@ -528,7 +529,7 @@ class ActionExecutor:
                 # prevents a slow but still-live touch from being mislabeled
                 # UNKNOWN halfway through its own input transaction.
                 completed = self.active
-                completed.sent_at = completed_at
+                completed.input_completed_at = completed_at
                 if completed in self.pending:
                     self.pending.remove(completed)
                 if completed not in self.ack_watch:
@@ -568,19 +569,28 @@ class ActionExecutor:
             action = pending.action
             skill = action.kind.value == 'activate_ability'
             if pending.state == 'sent':
+                # Never ACK a touch from the snapshot that was captured before
+                # that touch completed. Wait for an authoritative post-input
+                # probe frame; otherwise an older elixir/hand transition can
+                # be misattributed to this action.
+                ack_started_at = pending.input_completed_at or pending.sent_at
+                if (pending.input_completed_at > 0
+                        and state.received_at <= pending.input_completed_at):
+                    continue
                 if skill:
                     row = raw_controller(state, action)
                     if state.tick > pending.sent_tick and row and row.get('charges') == 0:
                         self.ack_watch.remove(pending)
                         self._clear_spend(pending.command_seq)
                         self.log('ability_ack', ability=action.ability_id, source_entity=action.source_entity,
-                                 tick=state.tick, latency_ms=(now-pending.sent_at)*1000,
+                                 tick=state.tick, latency_ms=(now-ack_started_at)*1000,
+                                 input_start_to_ack_ms=(now-pending.sent_at)*1000,
                                  evidence='same_controller_carrier_charge_1_to_0')
                         self.confirmed_actions += 1
                         self._fresh_state_required = True
                         if self.on_ability_ack:
                             self.on_ability_ack(action, state)
-                    elif now - pending.sent_at > config.ACK_TIMEOUT_SECONDS:
+                    elif now - ack_started_at > config.ACK_TIMEOUT_SECONDS:
                         self.ack_watch.remove(pending)
                         # An ambiguous ability tap must never be replayed, but
                         # it should not stop ordinary card play for the rest
@@ -609,9 +619,10 @@ class ActionExecutor:
                     self._clear_spend(pending.command_seq)
                     self.log('hand_ack', card=action.card_id, slot=action.hand_slot,
                         command_seq=pending.command_seq,
-                        tick=state.tick, latency_ms=(now-pending.sent_at)*1000,
+                        tick=state.tick, latency_ms=(now-ack_started_at)*1000,
                         decision_to_ack_ms=(now-pending.decision_at)*1000,
-                        input_to_ack_ms=(now-pending.sent_at)*1000,
+                        input_to_ack_ms=(now-ack_started_at)*1000,
+                        input_start_to_ack_ms=(now-pending.sent_at)*1000,
                         outcome='accepted',
                         evidence=('hand_rotation' if hand_changed else 'elixir_cost_drop'))
                     if action.card_id in BINDINGS and action.metadata.get('policy_effective_form_code') == 1:
@@ -620,7 +631,8 @@ class ActionExecutor:
                         if pending.prior_evolution_progress == BINDINGS[action.card_id].cycles and row.get('evolution_progress') == 0 and row.get('active_form') == 0:
                             self.log('evolution_ack', card=action.card_id, tick=state.tick,
                                 evidence='hand_transition_and_native_cycle_2_to_0',
-                                latency_ms=(now-pending.sent_at)*1000)
+                                latency_ms=(now-ack_started_at)*1000,
+                                input_start_to_ack_ms=(now-pending.sent_at)*1000)
                     # Hand rotation is the authoritative client-side
                     # consume acknowledgement.  A troop can spawn and die
                     # between two observations, and spells have no durable
@@ -638,7 +650,7 @@ class ActionExecutor:
                                  command_seq=pending.command_seq,
                                  card=action.card_id,
                                  reason='background_hand_ack')
-                elif now - pending.sent_at > config.ACK_TIMEOUT_SECONDS:
+                elif now - ack_started_at > config.ACK_TIMEOUT_SECONDS:
                     self.ack_watch.remove(pending)
                     # A missing ACK is ambiguous: the touch may have reached
                     # the game while telemetry was late.  Keep its virtual
