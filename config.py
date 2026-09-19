@@ -133,7 +133,8 @@ ACK_TIMEOUT_SECONDS = 0.35
 CARD_ACK_TIMEOUT_BASE_SECONDS = 1.1
 CARD_ACK_TIMEOUT_MAX_SECONDS = 1.4
 # Cold-start hand telemetry is consistently slower before the first few
-# accepted card ACKs. Use the existing max window only during that bootstrap.
+# authoritative hand/cycle ACKs. Weak elixir/entity ACKs do not count toward
+# this bootstrap because they are much faster than the slow telemetry path.
 CARD_ACK_BOOTSTRAP_SAMPLES = 3
 CARD_ACK_TIMEOUT_MARGIN_SECONDS = 0.18
 CARD_ACK_TIMEOUT_INPUT_MULTIPLIER = 2.0
