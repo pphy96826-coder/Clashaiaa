@@ -58,6 +58,8 @@ INCOMING_PUSH_MIN_COST = 5.0
 INCOMING_PUSH_BACKFIELD_DEPTH = 22000.0
 INCOMING_PUSH_DEFENDER_RELEASE_DEPTH = 18000.0
 INCOMING_PUSH_PUNISH_MIN_ELIXIR = 7.0
+INCOMING_PUSH_PLAY_BIND_TICKS = 16
+INCOMING_PUSH_RECENT_HEAVY_TICKS = 30
 INCOMING_PUSH_CORE_DEFENDERS = frozenset((MUSKETEER, CANNON))
 
 # Conservative impact envelopes in native world units.  They are deliberately
@@ -140,6 +142,8 @@ class FeatureAdapter:
         self._recent_enemy_building_expiry = None
         self._opponent_exact_play_count = 0
         self._opponent_last_play_count = {}
+        self._last_opponent_exact_play = None
+        self._recent_opponent_heavy_plays = deque(maxlen=8)
         self._incoming_push_cores = {}
 
     def _effect_provenance(self, semantic, entity_id):
@@ -224,7 +228,24 @@ class FeatureAdapter:
                     # the exact effect/cost is unsupported or Mirror-specific.
                     self._opponent_exact_play_count += 1
                     if old in self.bundle.card_specs and old != 28000006:
+                        spec = self.bundle.card_specs[old]
                         self._opponent_last_play_count[int(old)] = self._opponent_exact_play_count
+                        self._last_opponent_exact_play = {
+                            'card_id': int(old),
+                            'cost': float(spec.elixir_cost),
+                            'kind': spec.kind.value,
+                            'tick': int(state.tick),
+                            'play_count': int(self._opponent_exact_play_count),
+                        }
+                        if (spec.kind.value == 'troop'
+                                and float(spec.elixir_cost) >= INCOMING_PUSH_MIN_COST):
+                            self._recent_opponent_heavy_plays.append({
+                                'card_id': int(old),
+                                'cost': float(spec.elixir_cost),
+                                'tick': int(state.tick),
+                                'play_count': int(self._opponent_exact_play_count),
+                                'bound_entity_id': None,
+                            })
                 if changed and old in self.bundle.card_specs:
                     self._revealed[owner].add(old)
                     if old == 28000006:
@@ -636,12 +657,12 @@ class FeatureAdapter:
     def _incoming_push_context(self):
         """Track a public heavy backfield deployment before it becomes pressure.
 
-        A five-plus-elixir enemy troop first seen deep on the opponent's side
-        is enough to declare an incoming push.  The core remains tracked while
-        that exact public entity is alive, so the preparation state does not
-        flicker off merely because it walked out of the original backfield
-        band.  This is tactical board-state tracking only; it does not infer
-        hidden hand contents from entity births.
+        Prefer an entity whose public source card is directly known. Some live
+        runtime carriers expose only an archetype/form ID, though, so a second
+        path binds a known exact opponent hand transition for a heavy troop to
+        a newly appeared enemy body in the backfield. The latter never invents
+        a hidden card: card identity/cost came from the native hand transition
+        and the board body is used only to locate the push.
         """
         live_ids = set(self._live_entities)
         self._incoming_push_cores = {
@@ -671,7 +692,76 @@ class FeatureAdapter:
                     'cost': cost,
                     'first_seen_tick': int(self._first_seen.get(int(eid), self._observed_tick)),
                     'initial_lane': 'left' if x < 9000.0 else 'right',
+                    'evidence': 'entity_card_spec',
                 }
+
+        # Runtime entities can carry archetype/form IDs that are intentionally
+        # absent from CardSpec. Recover only when an exact recent opponent
+        # heavy-troop play is already proven by a native hand transition.
+        cat = self.bundle.entity_archetype_catalog
+        recent_heavy = [
+            row for row in self._recent_opponent_heavy_plays
+            if 0 <= int(self._observed_tick) - int(row['tick'])
+            <= INCOMING_PUSH_RECENT_HEAVY_TICKS
+        ]
+        for played in recent_heavy:
+            bound = played.get('bound_entity_id')
+            if bound in live_ids:
+                continue
+            candidates = []
+            for eid, ent in self._live_entities.items():
+                eid = int(eid)
+                if eid in self._incoming_push_cores:
+                    continue
+                if int(ent.get('owner', -1)) == self.actor_owner:
+                    continue
+                hp = ent.get('hp')
+                max_hp = ent.get('max_hp')
+                if hp is not None and float(hp) <= 0:
+                    continue
+                if max_hp is not None and float(max_hp) <= 0:
+                    continue
+                depth = self._defensive_depth(ent['y'])
+                if depth < INCOMING_PUSH_BACKFIELD_DEPTH:
+                    continue
+                first_seen = int(self._first_seen.get(eid, self._observed_tick))
+                delta = abs(first_seen - int(played['tick']))
+                if delta > INCOMING_PUSH_PLAY_BIND_TICKS:
+                    continue
+                cid = int(ent.get('card_id', -1))
+                spec = self.bundle.card_specs.get(cid)
+                # A supported source card proves this body belongs elsewhere;
+                # never hijack it for a different exact play.
+                if spec is not None:
+                    continue
+                gid = runtime_u32(ent.get('native_data_global_id')) or None
+                vocab = cat.runtime_global_vocab_id(gid) if gid else 1
+                metadata = cat.metadata_for_vocab_id(vocab) if vocab > 1 else None
+                runtime_kind = (
+                    metadata.child_kind
+                    if metadata and metadata.child_kind_known else 'unknown'
+                )
+                if runtime_kind not in ('unknown', 'troop'):
+                    continue
+                candidates.append((
+                    delta,
+                    -float(max_hp or hp or 0.0),
+                    eid,
+                    ent,
+                    first_seen,
+                ))
+            if not candidates:
+                continue
+            _, _, eid, ent, first_seen = min(candidates)
+            x = float(ent['x'])
+            self._incoming_push_cores[eid] = {
+                'card_id': int(played['card_id']),
+                'cost': float(played['cost']),
+                'first_seen_tick': first_seen,
+                'initial_lane': 'left' if x < 9000.0 else 'right',
+                'evidence': 'exact_play_plus_new_backfield_entity',
+            }
+            played['bound_entity_id'] = eid
 
         active = []
         for eid, tracked in self._incoming_push_cores.items():
@@ -702,6 +792,7 @@ class FeatureAdapter:
             'core_cost': nearest['cost'],
             'core_depth': nearest['depth'],
             'core_count': len(active),
+            'evidence': nearest.get('evidence', 'entity_card_spec'),
             'reserve_core_defenders': (
                 nearest['depth'] > INCOMING_PUSH_DEFENDER_RELEASE_DEPTH
             ),
@@ -1399,6 +1490,31 @@ class FeatureAdapter:
             incoming_push.get('core_depth') if incoming_push else None)
         self.quality['incoming_push_core_count'] = (
             incoming_push.get('core_count') if incoming_push else 0)
+        self.quality['incoming_push_evidence'] = (
+            incoming_push.get('evidence') if incoming_push else None)
+        last_exact = self._last_opponent_exact_play
+        self.quality['opponent_last_exact_play_card_id'] = (
+            last_exact.get('card_id') if last_exact else None)
+        self.quality['opponent_last_exact_play_cost'] = (
+            last_exact.get('cost') if last_exact else None)
+        self.quality['opponent_last_exact_play_kind'] = (
+            last_exact.get('kind') if last_exact else None)
+        self.quality['opponent_last_exact_play_age_ticks'] = (
+            int(state.tick) - int(last_exact['tick']) if last_exact else None)
+        recent_heavy = next((
+            row for row in reversed(self._recent_opponent_heavy_plays)
+            if 0 <= int(state.tick) - int(row['tick'])
+            <= INCOMING_PUSH_RECENT_HEAVY_TICKS
+        ), None)
+        self.quality['opponent_recent_heavy_card_id'] = (
+            recent_heavy.get('card_id') if recent_heavy else None)
+        self.quality['opponent_recent_heavy_cost'] = (
+            recent_heavy.get('cost') if recent_heavy else None)
+        self.quality['opponent_recent_heavy_age_ticks'] = (
+            int(state.tick) - int(recent_heavy['tick'])
+            if recent_heavy else None)
+        self.quality['opponent_recent_heavy_bound_entity_id'] = (
+            recent_heavy.get('bound_entity_id') if recent_heavy else None)
         self.quality['incoming_push_reserve_defenders'] = bool(
             incoming_push and incoming_push.get('reserve_core_defenders'))
         self.quality['neutral_patience_active'] = neutral_patience
@@ -1530,6 +1646,27 @@ class FeatureAdapter:
                          incoming_push.get('core_depth') if incoming_push else None),
                      'incoming_push_core_count': (
                          incoming_push.get('core_count') if incoming_push else 0),
+                     'incoming_push_evidence': (
+                         incoming_push.get('evidence') if incoming_push else None),
+                     'opponent_last_exact_play_card_id': (
+                         last_exact.get('card_id') if last_exact else None),
+                     'opponent_last_exact_play_cost': (
+                         last_exact.get('cost') if last_exact else None),
+                     'opponent_last_exact_play_kind': (
+                         last_exact.get('kind') if last_exact else None),
+                     'opponent_last_exact_play_age_ticks': (
+                         int(state.tick) - int(last_exact['tick'])
+                         if last_exact else None),
+                     'opponent_recent_heavy_card_id': (
+                         recent_heavy.get('card_id') if recent_heavy else None),
+                     'opponent_recent_heavy_cost': (
+                         recent_heavy.get('cost') if recent_heavy else None),
+                     'opponent_recent_heavy_age_ticks': (
+                         int(state.tick) - int(recent_heavy['tick'])
+                         if recent_heavy else None),
+                     'opponent_recent_heavy_bound_entity_id': (
+                         recent_heavy.get('bound_entity_id')
+                         if recent_heavy else None),
                      'incoming_push_reserve_defenders': bool(
                          incoming_push and incoming_push.get('reserve_core_defenders')),
                      'neutral_patience_active': neutral_patience,
