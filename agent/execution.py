@@ -549,6 +549,9 @@ class ActionExecutor:
                 self.pending.clear()
                 self.log('input_fault', error=self.fault)
             self.future, self.active = None, None
+            # Future completion may happen after the poll's initial timestamp.
+            # Refresh monotonic time before reconciling older ACK watches.
+            now = time.perf_counter()
         if state is None:
             # A transient query failure must not launch any queued touch.
             return
