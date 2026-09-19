@@ -213,10 +213,15 @@ class CustomCardDeployAgent:
             console.start()
         self.actuator.prepare()
         if self.adapter.hero_mode is not False:
-            from bridge.hero_execution import ability_button
+            from bridge.hero_execution import ensure_ability_calibration
             try:
-                ability_button(config.ABILITY_CALIBRATION_PATH, self.actuator.size)
+                ability_point, generated = ensure_ability_calibration(
+                    config.ABILITY_CALIBRATION_PATH, self.actuator.size)
                 self.adapter.hero_skill_ready = True
+                self.log('ability_input_ready',
+                         screen=list(ability_point),
+                         calibration=str(config.ABILITY_CALIBRATION_PATH),
+                         generated=generated)
             except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError) as exc:
                 self.log('ability_input_disabled', reason=str(exc))
         if lifecycle is not None:
@@ -322,7 +327,8 @@ class CustomCardDeployAgent:
                         f"battle={'active' if current_state is not None else 'idle'} "
                         f"tick={getattr(current_state, 'tick', None)} "
                         f"confirmed={self.executor.confirmed_actions} "
-                        f"pending={len(self.executor.pending)} matches={match_count}"
+                        f"pending={len(self.executor.pending)} "
+                        f"ack_watch={len(self.executor.ack_watch)} matches={match_count}"
                     )
                 elif name == 'recover':
                     if lifecycle is None:
@@ -440,7 +446,7 @@ class CustomCardDeployAgent:
                                      matches=match_count)
                             break
                         try:
-                            lifecycle.start_battle()
+                            lifecycle.start_battle(ensure_lobby=False)
                         except LifecycleError as exc:
                             self.log('lifecycle_error', phase='next-battle', error=str(exc))
                             break
@@ -652,6 +658,7 @@ class CustomCardDeployAgent:
                         time.sleep(.001)
                         continue
                     if (auto_emotes and lifecycle is not None and not self.executor.pending
+                            and not self.executor.ack_watch
                             and self.executor.future is None and time.monotonic() >= next_emote_at):
                         try:
                             lifecycle.send_emote(random.randrange(8))
@@ -669,11 +676,20 @@ class CustomCardDeployAgent:
                         self.log('execution_halted', reason=self.executor.fault,
                                  tick=state.tick)
                         break
-                    if (self.executor.max_actions is not None and
-                        self.executor.confirmed_actions >= self.executor.max_actions):
-                        self.log('action_budget_reached', max_actions=self.executor.max_actions,
-                                 confirmed_actions=self.executor.confirmed_actions, tick=state.tick)
-                        break
+                    if self.executor.action_budget_exhausted:
+                        # Do not keep running policy after the requested number
+                        # of real action attempts. Let background ACK watches
+                        # reconcile for at most their normal timeout, then stop
+                        # with complete outcome logs.
+                        if self.executor.action_budget_settled:
+                            self.log('action_budget_reached',
+                                     max_actions=self.executor.max_actions,
+                                     attempted_actions=self.executor.attempted_actions,
+                                     confirmed_actions=self.executor.confirmed_actions,
+                                     tick=state.tick)
+                            break
+                        time.sleep(.005)
+                        continue
                     if model_warmup_pending:
                         warm_batch, _ = self.adapter.tensorize(
                             state, self.executor.blocked_slots(state),
@@ -689,11 +705,11 @@ class CustomCardDeployAgent:
                     if paused or pending_model is not None:
                         time.sleep(.01)
                         continue
-                    # Do not infer against a state that is about to be
-                    # invalidated by the previous card input.  Input is
-                    # strictly serial; policy decisions must be serial too,
-                    # otherwise a queued decision can be based on the old
-                    # hand/elixir and become suboptimal after rotation.
+                    # Touch input remains strictly serial, but ACK
+                    # reconciliation is background work. Once the touch worker
+                    # completes, ack_watch keeps the old slot/cost protected
+                    # while policy may react with another legal slot on a
+                    # fresh authoritative frame.
                     if (state.tick >= FIRST_POLICY_DECISION_TICK
                             and state.tick >= last_decision_tick + config.DECISION_TICKS
                             and not self.executor.pending
@@ -735,6 +751,9 @@ class CustomCardDeployAgent:
                         if not waiting:
                             self.log('decision', tick=state.tick, inference_ms=inference_ms,
                                 pipeline_ms=(time.perf_counter()-pipeline_start)*1000,
+                                probe_query_ms=self.probe.last_query_ms,
+                                frame_to_policy_start_ms=max(
+                                    0.0, (pipeline_start-state.received_at)*1000),
                                 tick_gap=None if last_decision_tick < 0 else state.tick-last_decision_tick,
                                 simulation_used=simulation_entities is not None,
                                 simulation_entity_count=(len(simulation_entities)

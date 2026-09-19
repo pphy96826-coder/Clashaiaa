@@ -134,6 +134,21 @@ workspace/
 
 ### 连续对战与控制台
 
+桌面控制台可直接启动：
+
+```bash
+./desktop_console.command
+```
+
+窗口会保存 checkpoint、device、连续对战、最大局数、启动方式和日志路径到
+`desktop_console.local.json`（该文件只保存在本机，不提交到仓库）。启动方式可选
+“启动新对局”或“接管当前对局”；运行中窗口显示 PID、stdout/stderr、
+关键事件和滚动日志，并提供安全停止与强制停止。窗口中的 Python 解释器优先使用
+已保存路径或 `CR_AGENT_PYTHON`，启动前会验证 `native_runner` 与 `torch` 是否能导入；
+勾选“自动发表情”后，Agent 会在对局中按现有生命周期节奏自动发送表情。
+
+也可以在 Finder 中双击 `desktop_console.command`，把它拖到桌面即可作为快捷方式使用。
+
 在已验证的 MuMu 实例上，使用 `--continuous --console` 可自动处理结算页、
 回到大厅并开启下一局。控制台命令在运行中输入：
 

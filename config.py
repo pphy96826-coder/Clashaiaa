@@ -126,10 +126,18 @@ FULL_SIMULATION_REQUIRE_STANDARD_DECK = SETTINGS.get(
 FULL_SIMULATION_PARTIAL_OPPONENT = SETTINGS.get(
     'full_simulation_partial_opponent', True) is True
 STALE_SECONDS = 1.2
-# Hand rotation is advisory telemetry, not an input gate.  Release a missed
-# action quickly so a slow/missing ACK cannot stall the match for seconds;
-# the touch worker remains strictly serial and never replays the write.
+# Ability ACKs stay short because an ambiguous skill tap is never replayed.
+# Card ACKs use a separate bounded adaptive budget below: while waiting, only
+# that exact native slot is locked, so unrelated cards can still be played.
 ACK_TIMEOUT_SECONDS = 0.35
+CARD_ACK_TIMEOUT_BASE_SECONDS = 1.1
+CARD_ACK_TIMEOUT_MAX_SECONDS = 1.4
+# Cold-start hand telemetry is consistently slower before the first few
+# authoritative hand/cycle ACKs. Weak elixir/entity ACKs do not count toward
+# this bootstrap because they are much faster than the slow telemetry path.
+CARD_ACK_BOOTSTRAP_SAMPLES = 3
+CARD_ACK_TIMEOUT_MARGIN_SECONDS = 0.18
+CARD_ACK_TIMEOUT_INPUT_MULTIPLIER = 2.0
 # Keep an ambiguous touch visible to the model briefly after timeout.  The
 # card remains usable and other slots are not blocked; this only prevents a
 # missing ACK from making the same threat look completely untouched.
@@ -138,6 +146,13 @@ UNCERTAIN_PREDICTION_SECONDS = 1.4
 # publishing the updated hand/elixir snapshot. This prevents stale telemetry
 # from authorizing a second card that the game can no longer afford.
 ELIXIR_RESERVATION_SECONDS = 1.25
+# Weak positive ACKs (spawn or elixir before native hand rotation) keep the
+# exact stale slot quarantined until either the native hand rotates or the
+# exact native cycle plus the other three hand slots uniquely prove the
+# replacement card. This value only bounds the extra *virtual spend*
+# protection; timeout alone never reopens a stale slot.
+# The quarantine is slot-local, so the other three cards continue normally.
+SLOT_CONSUME_GUARD_MAX_SECONDS = 3.0
 ACTION_MAX_LATENESS_SECONDS = 0.8
 # Minimum UI settle time between selecting a card and placing it.  Keep a
 # bounded gap for the Android UI commit, but avoid adding an unnecessary

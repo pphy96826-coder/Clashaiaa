@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 settings.local.json
 settings.*.local.json
+desktop_console.local.json
 dist/
 wheelhouse/
 ability_calibration.local.json

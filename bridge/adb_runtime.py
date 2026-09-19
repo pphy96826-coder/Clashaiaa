@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import subprocess
 import time
-import re
 
 
 def parse_devices(output: str) -> list[str]:
@@ -28,7 +27,7 @@ def parse_devices(output: str) -> list[str]:
 def _is_ready(adb: str, serial: str, timeout: float = 3.0) -> bool:
     try:
         result = subprocess.run(
-            [adb, "-s", serial, "get-state"], capture_output=True, text=True,
+            [adb, "-s", serial, "get-state"], capture_output=True, text=True, errors='replace',
             timeout=timeout, check=False)
         return result.returncode == 0 and result.stdout.strip() == "device"
     except (OSError, subprocess.SubprocessError):
@@ -40,7 +39,7 @@ def _mumu_listener_ports() -> list[int]:
     try:
         result = subprocess.run(
             ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], capture_output=True,
-            text=True, timeout=2.0, check=False)
+            text=True, errors='replace', timeout=2.0, check=False)
     except (OSError, subprocess.SubprocessError):
         return []
     ports = []

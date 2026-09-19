@@ -7,6 +7,9 @@ MUSKETEER = 26000014
 ABILITY = 'Musketeer_hero_Ability'
 # Visible button/rim and its touch region in the measured 1080x1920 HUD.
 ABILITY_HUD_BOUNDS = (875, 1350, 1080, 1545)
+# Measured center of the single-controller Hero Musketeer ability button on
+# the calibrated 1080x1920 HUD. Same-aspect screens are scaled at runtime.
+DEFAULT_ABILITY_POINT = (940, 1480)
 
 
 def covered_by_ability_hud(point, size=(1080, 1920)):
@@ -37,6 +40,41 @@ def raw_controller(state, action):
         and r.get('ability_name') == action.ability_id and r.get('controller_slot') == 1
         and r.get('members') == [action.source_entity]]
     return matches[0] if len(matches) == 1 else None
+
+
+def ensure_ability_calibration(path, size):
+    """Return a usable ability point, creating the measured default if absent.
+
+    The live Hero HUD contract is already restricted to the single-controller
+    Musketeer button.  On the calibrated 1080x1920 aspect ratio we can safely
+    persist that measured point automatically instead of disabling the entire
+    skill path just because the machine-local JSON file has not been created.
+    Existing calibration files are never overwritten.
+    """
+    candidate = Path(path)
+    if candidate.is_file():
+        return ability_button(candidate, size), False
+    width, height = size
+    if not all(isinstance(v, (int, float)) and math.isfinite(v)
+               for v in (width, height)) or width <= 0 or height <= 0:
+        raise ValueError('invalid screen size for ability calibration')
+    if abs(width / height - 1080 / 1920) > .005:
+        raise ValueError('ability button screen aspect ratio changed')
+    point = DEFAULT_ABILITY_POINT
+    if not covered_by_ability_hud(point, (1080, 1920)):
+        raise ValueError('measured ability point is outside HUD bounds')
+    payload = {
+        'ability_id': ABILITY,
+        'controller_slot': 1,
+        'verified': True,
+        'size': [1080, 1920],
+        'point': list(point),
+        'source': 'measured_single_controller_hud_v1',
+    }
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n',
+                         encoding='utf-8')
+    return ability_button(candidate, size), True
 
 
 def ability_button(path, size):

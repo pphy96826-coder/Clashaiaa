@@ -1,6 +1,6 @@
 import copy
 import unittest
-from test_pipeline import opening
+from tests.test_pipeline import opening
 from agent.feature_adapter import FeatureAdapter
 from bridge.ability_state import ability_states
 from bridge.probe_client import ProbeClient
