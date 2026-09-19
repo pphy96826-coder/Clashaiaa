@@ -651,8 +651,18 @@ class FeatureAdapter:
             'support_hp_fraction': best['hp_fraction'],
         }
 
+    def _defensive_depth(self, y):
+        """Distance from our native baseline toward the enemy baseline.
+
+        Owner 0 defends the low-Y side; owner 1 defends the high-Y side.
+        Using min(y, 32000-y) here is wrong because it treats units near the
+        opponent's own baseline as pressure on us.
+        """
+        y = float(y)
+        return y if self.actor_owner == 0 else 32000.0 - y
+
     def _has_defensive_pressure(self):
-        """Whether any live enemy is already in the central/defensive half.
+        """Whether any live enemy is already in our central/defensive half.
 
         Neutral patience must never suppress a real defensive response just
         because threats are split across lanes or are not yet inside the
@@ -666,13 +676,12 @@ class FeatureAdapter:
             hp = ent.get('hp')
             if hp is not None and float(hp) <= 0:
                 continue
-            y = float(ent['y'])
-            if min(y, 32000.0 - y) <= 14500.0:
+            if self._defensive_depth(ent['y']) <= 14500.0:
                 return True
         return False
 
     def _single_defensive_threat_lane(self):
-        """Return one unambiguous nearby enemy lane, otherwise None."""
+        """Return one unambiguous enemy lane inside our defensive half."""
         enemy = []
         for ent in self._live_entities.values():
             if int(ent.get('owner', -1)) == self.actor_owner or int(ent.get('card_id', -1)) <= 0:
@@ -681,9 +690,9 @@ class FeatureAdapter:
             if hp is not None and float(hp) <= 0:
                 continue
             x, y = float(ent['x']), float(ent['y'])
-            # Match the execution validator exactly: only nearby central/
-            # defensive-half enemies can constrain a defensive placement.
-            if min(y, 32000.0 - y) > 14500.0:
+            # Match the strategy phase and execution validator in actor-relative
+            # coordinates: only enemies on OUR half may constrain defense.
+            if self._defensive_depth(y) > 14500.0:
                 continue
             lane = 'left' if x < 9000.0 else 'right'
             enemy.append((lane, x, y))
