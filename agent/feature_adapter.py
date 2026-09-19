@@ -49,6 +49,7 @@ NEUTRAL_PATIENCE_CARDS = frozenset((HOG_RIDER, MUSKETEER, CANNON, FIREBALL))
 ATTACK_HOLD_TOWER_DISTANCE = 7000.0
 ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR = 8.0
 NEUTRAL_PATIENCE_RELEASE_ELIXIR = 8.5
+RECENT_BUILDING_ATTACK_WINDOW_TICKS = 50
 COUNTERPUSH_MIN_PROGRESS = 9000.0
 COUNTERPUSH_MAX_PROGRESS = 17000.0
 
@@ -128,6 +129,8 @@ class FeatureAdapter:
         self._heal_events = HealEvents(origins=self._effect_origins)
         self._invalid_causal_entities = set()
         self._effects_by_entity = {}
+        self._active_enemy_buildings = {}
+        self._recent_enemy_building_expiry = None
 
     def _effect_provenance(self, semantic, entity_id):
         if not self._effects_by_entity.get(entity_id, ((), False))[1]:
@@ -218,6 +221,34 @@ class FeatureAdapter:
                         card_id=old, data={'kind': 'play_card', 'hand_slot': slot,
                         'evidence': 'native_hand_transition', 'cost': self.bundle.card_specs[old].elixir_cost}))
             self._previous_hands[owner] = hand
+        # Track only public opponent building lifecycle. A building becoming
+        # visible is public board state; its disappearance starts a short,
+        # conservative Hog opportunity window without inferring hidden hand.
+        current_enemy_buildings = {}
+        for ent in state.entities:
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+            cid = int(ent.get('card_id', -1))
+            spec = self.bundle.card_specs.get(cid)
+            hp = ent.get('hp')
+            if (cid > 0 and spec is not None and spec.kind.value == 'building'
+                    and (hp is None or float(hp) > 0)):
+                current_enemy_buildings[int(ent['id'])] = cid
+        expired = [
+            (eid, cid) for eid, cid in self._active_enemy_buildings.items()
+            if eid not in current_enemy_buildings
+        ]
+        for eid, cid in expired:
+            # If another copy of the same building is still alive, there is no
+            # clean "building is gone" attack window yet.
+            if cid not in current_enemy_buildings.values():
+                self._recent_enemy_building_expiry = {
+                    'entity_id': eid,
+                    'card_id': cid,
+                    'tick': state.tick,
+                }
+        self._active_enemy_buildings = current_enemy_buildings
+
         current = {}
         previous_velocity = self._previous_velocity
         self._velocity = {}
