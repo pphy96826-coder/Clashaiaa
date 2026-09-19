@@ -523,18 +523,19 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertTrue(o.action_mask.reasons['heavy_defend_cannon_held'])
 
-        # Musketeer stays available, but only as a left-lane backline defender.
-        musk = o.action_mask.placement_masks['0']
-        self.assertEqual(musk['heavy_defense_lane'], 'left')
+        # The heavy core is still too far away to pre-spend Musketeer. Cheap
+        # cycle may answer the immediate distractor while all key defenders
+        # remain reserved for the tracked push.
+        self.assertFalse(o.action_mask.hand_slots[0])
         self.assertEqual(
-            musk['heavy_defense_musketeer_max_defensive_depth'], 9500.0)
-        self.assertTrue(any(
-            row[x] for row in musk['row_major'] for x in range(0, 9)))
-        self.assertFalse(any(
-            row[x] for row in musk['row_major'] for x in range(9, 18)))
-        for y, row in enumerate(musk['row_major']):
-            if any(row):
-                self.assertLessEqual((y + 0.5) * 1000.0, 9500.0)
+            o.action_mask.reasons['slot_reasons']['0'],
+            'strategy_hold_musketeer_for_heavy_core',
+        )
+        self.assertTrue(o.action_mask.reasons['heavy_defend_musketeer_held'])
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_stage'],
+            'wait_for_approach',
+        )
 
         # Cheap cycle may answer the immediate distractor on the right.
         cycle = o.action_mask.placement_masks['2']
@@ -566,6 +567,12 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.reasons['incoming_push_defending'])
         self.assertFalse(o.action_mask.reasons['heavy_defend_cannon_held'])
         self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_card_id'], 27000000)
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_stage'],
+            'anchor_then_backline',
+        )
 
         cannon = o.action_mask.placement_masks['1']
         self.assertEqual(cannon['heavy_defense_lane'], 'left')
@@ -583,10 +590,109 @@ class AdapterTests(unittest.TestCase):
                 self.assertGreaterEqual(depth, 4500.0)
                 self.assertLessEqual(depth, 11500.0)
 
+        # Cannon is the first key commitment at this depth; Musketeer waits
+        # until the anchor leaves the hand / is acknowledged, preventing a
+        # multi-card dump on adjacent decisions.
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'strategy_wait_heavy_defense_priority',
+        )
+
+    def test_heavy_defense_priority_uses_backline_before_body(self):
+        raw = opening()
+        hand = (26000014, 27000000, 26000038, 26000010)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-defense-priority-backline')
+        s.elixir = 10.0
+
+        add_enemy(s, 9208, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9208)
+        giant['y'] = 13000
+        s.tick += 1
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_stage'],
+            'backline_then_body',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_card_id'], 26000014)
+
+        # Cannon is not yet in its anchor window. Musketeer is the one allowed
+        # key commitment; Ice Golem waits for that commitment to resolve.
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_hold_cannon_for_heavy_core',
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_wait_heavy_defense_priority',
+        )
+
         musk = o.action_mask.placement_masks['0']
         self.assertEqual(musk['heavy_defense_lane'], 'left')
         self.assertEqual(
             musk['heavy_defense_musketeer_max_defensive_depth'], 9500.0)
+
+    def test_heavy_defense_emergency_releases_core_sequence(self):
+        raw = opening()
+        hand = (26000014, 27000000, 26000038, 26000010)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-defense-priority-emergency')
+        s.elixir = 10.0
+
+        add_enemy(s, 9209, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9209)
+        giant['y'] = 4000
+        s.tick += 1
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertTrue(
+            o.action_mask.reasons['heavy_defend_emergency_release'])
+        self.assertIsNone(
+            o.action_mask.reasons['heavy_defend_priority_card_id'])
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_stage'],
+            'emergency_release',
+        )
+
+        # At emergency depth sequencing yields to survival: all three key
+        # defenders may be selected immediately (still with role/lane masks).
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.placement_masks['0']['heavy_defense_lane'], 'left')
+        self.assertEqual(
+            o.action_mask.placement_masks['1']['heavy_defense_lane'], 'left')
+        self.assertEqual(
+            o.action_mask.placement_masks['2']['heavy_defense_lane'], 'left')
 
     def test_heavy_defense_stages_ice_golem_and_cheap_control(self):
         raw = opening()
