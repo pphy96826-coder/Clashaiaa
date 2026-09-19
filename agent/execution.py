@@ -161,11 +161,12 @@ class ActionExecutor:
     def _card_ack_timeout_seconds(self):
         """Return a bounded ACK budget without stalling unrelated slots.
 
-        Card ACK telemetry can lag Android input completion by close to a
-        second on busy emulator frames.  Keep a one-second floor, expand it
-        modestly when recent input/ACK latency is slow, and cap it below the
-        resource-reservation horizon.  Only the submitted slot remains locked
-        while this budget runs; other slots may continue normally.
+        Card ACK telemetry can lag Android input completion by more than a
+        second on busy emulator frames. Keep a conservative live-safe floor,
+        expand it modestly when recent input/ACK latency is slow, and cap the
+        adaptive window so genuine misses still settle promptly. Active ACK
+        watches keep their spend reserved independently of the age TTL, and
+        only the submitted slot remains locked while this budget runs.
         """
         timeout = float(config.CARD_ACK_TIMEOUT_BASE_SECONDS)
         input_based = (
