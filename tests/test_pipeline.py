@@ -1102,6 +1102,100 @@ class ExecutorTests(unittest.TestCase):
         ]
         self.assertEqual(len(spends), 1)
 
+    def test_timed_out_card_waits_for_live_competing_ack(self):
+        s = state()
+        now = time.perf_counter()
+
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        p1 = self.executor.pending.pop(0)
+        p1.state = 'sent'
+        p1.sent_at = now - 2.0
+        p1.sent_tick = s.tick
+        p1.input_completed_at = now - 1.5
+        p1.ack_timeout_seconds = 0.01
+        p1.prior_elixir = s.elixir
+        p1.prior_cycle = self.executor._native_cycle(s, first.owner)
+        p1.prior_raw_hand_card = self.executor._raw_hand_card(
+            s, first.hand_slot, first.owner)
+        self.executor.ack_watch.append(p1)
+
+        second = play(slot=1, card=s.hand_cards[1])
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        p2 = self.executor.pending.pop(0)
+        p2.state = 'sent'
+        p2.sent_at = now
+        p2.sent_tick = s.tick
+        p2.input_completed_at = now
+        p2.ack_timeout_seconds = 10.0
+        p2.prior_elixir = s.elixir
+        p2.prior_cycle = self.executor._native_cycle(s, second.owner)
+        p2.prior_raw_hand_card = self.executor._raw_hand_card(
+            s, second.hand_slot, second.owner)
+        self.executor.ack_watch.append(p2)
+
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertIn(p1, self.executor.ack_watch)
+        self.assertIn(p2, self.executor.ack_watch)
+        self.assertTrue(p1.retry_waiting)
+        self.assertEqual(p1.retry_probe_tick, -1)
+        waits = [
+            data for event, data in self.events
+            if event == 'action_retry_waiting'
+            and data['command_seq'] == p1.command_seq
+        ]
+        self.assertEqual(waits[-1]['reason'], 'live_ack_watch')
+        self.assertNotIn(
+            p1.command_seq,
+            [data['command_seq'] for event, data in self.events
+             if event == 'action_missed'])
+
+    def test_oldest_of_two_timed_out_cards_arms_retry_first(self):
+        s = state()
+        now = time.perf_counter()
+        pending_rows = []
+
+        for slot in (0, 1):
+            action = play(slot=slot, card=s.hand_cards[slot])
+            self.executor.submit(SimpleNamespace(actions=(action,)), s)
+            pending = self.executor.pending.pop(0)
+            pending.state = 'sent'
+            pending.sent_at = now - 2.0
+            pending.sent_tick = s.tick
+            pending.input_completed_at = now - 1.5
+            pending.ack_timeout_seconds = 0.01
+            pending.prior_elixir = s.elixir
+            pending.prior_cycle = self.executor._native_cycle(
+                s, action.owner)
+            pending.prior_raw_hand_card = self.executor._raw_hand_card(
+                s, action.hand_slot, action.owner)
+            self.executor.ack_watch.append(pending)
+            pending_rows.append(pending)
+
+        first, second = pending_rows
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertEqual(first.retry_probe_tick, s.tick)
+        self.assertFalse(first.retry_waiting)
+        self.assertEqual(second.retry_probe_tick, -1)
+        self.assertTrue(second.retry_waiting)
+        waits = [
+            data for event, data in self.events
+            if event == 'action_retry_waiting'
+            and data['command_seq'] == second.command_seq
+        ]
+        self.assertEqual(
+            waits[-1]['waiting_for'], first.command_seq)
+        self.assertEqual(
+            waits[-1]['reason'], 'older_timed_out_retry')
+        self.assertNotIn(
+            'action_missed', [event for event, _ in self.events])
+
     def test_late_hand_rotation_after_retry_arm_acks_without_replay(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
