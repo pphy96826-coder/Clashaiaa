@@ -635,6 +635,32 @@ class FeatureAdapter:
             'required_effective_elixir': ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR,
         }
 
+    def _recent_building_attack_window(self, tick, defensive_pressure=False):
+        """Return a short public-information Hog window after a building dies.
+
+        This is deliberately not a hidden-hand/cycle oracle.  It only uses a
+        defensive building that was visibly alive and has just disappeared.
+        The window is short enough to be useful before an ordinary cycle is
+        likely to return the same answer.
+        """
+        if defensive_pressure:
+            return None
+        row = self._recent_enemy_building_expiry
+        if not row:
+            return None
+        age = int(tick) - int(row['tick'])
+        if age < 0 or age > RECENT_BUILDING_ATTACK_WINDOW_TICKS:
+            return None
+        if int(row['card_id']) in self._active_enemy_buildings.values():
+            return None
+        return {
+            'reason': 'recent_enemy_building_expired',
+            'card_id': int(row['card_id']),
+            'entity_id': int(row['entity_id']),
+            'age_ticks': age,
+            'remaining_ticks': RECENT_BUILDING_ATTACK_WINDOW_TICKS - age,
+        }
+
     def _counterpush_context(self, pressure=None):
         """Detect one unambiguous surviving support lane after defense.
 
@@ -1088,6 +1114,8 @@ class FeatureAdapter:
             strategy_phase == 'neutral'
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
         )
+        building_attack_window = self._recent_building_attack_window(
+            state.tick, defensive_pressure=defensive_pressure)
         self.quality['strategy_phase'] = strategy_phase
         self.quality['attack_hold_reason'] = (
             attack_hold['reason'] if attack_hold else None)
@@ -1098,6 +1126,13 @@ class FeatureAdapter:
         self.quality['counterpush_support_entity_id'] = (
             counterpush['support_entity_id'] if counterpush else None)
         self.quality['neutral_patience_active'] = neutral_patience
+        self.quality['attack_window_reason'] = (
+            building_attack_window['reason'] if building_attack_window else None)
+        self.quality['attack_window_card_id'] = (
+            building_attack_window['card_id'] if building_attack_window else None)
+        self.quality['attack_window_age_ticks'] = (
+            building_attack_window['age_ticks'] if building_attack_window else None)
+        self.quality['active_enemy_building_count'] = len(self._active_enemy_buildings)
         for slot, cid in slots.items():
             spec = self.bundle.card_specs[cid]
             if selections is not None:
@@ -1130,8 +1165,9 @@ class FeatureAdapter:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
             if neutral_patience and cid in NEUTRAL_PATIENCE_CARDS:
-                slot_reasons[str(slot)] = 'strategy_neutral_patience'
-                continue
+                if not (cid == HOG_RIDER and building_attack_window is not None):
+                    slot_reasons[str(slot)] = 'strategy_neutral_patience'
+                    continue
             entry = self.build_placement_mask(cid, lanes, towers, entities,
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
                 ability_hud=ability_hud)
@@ -1177,7 +1213,14 @@ class FeatureAdapter:
                      'counterpush_support_card_id': (
                          counterpush['support_card_id'] if counterpush else None),
                      'neutral_patience_active': neutral_patience,
-                     'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR})
+                     'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR,
+                     'attack_window_reason': (
+                         building_attack_window['reason'] if building_attack_window else None),
+                     'attack_window_card_id': (
+                         building_attack_window['card_id'] if building_attack_window else None),
+                     'attack_window_age_ticks': (
+                         building_attack_window['age_ticks'] if building_attack_window else None),
+                     'active_enemy_building_count': len(self._active_enemy_buildings)})
         crowns = {}
         for owner in (0, 1):
             enemy = [t for t in towers if t.owner != owner]
