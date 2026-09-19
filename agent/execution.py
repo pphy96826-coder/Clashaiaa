@@ -1256,6 +1256,15 @@ class ActionExecutor:
                             row for row in self.ack_watch
                             if row is not pending and not retry_due(row)
                         ]
+                        # A previously selected retry may already have moved
+                        # from ACK watch back into the serial input queue. Do
+                        # not arm the next timed-out card against a baseline
+                        # that predates that retry touch.
+                        live_competitors.extend(
+                            row for row in self.pending
+                            if row is not pending
+                            and row.action.kind.value == 'play_card'
+                        )
                         if live_competitors:
                             if not getattr(pending, 'retry_waiting', False):
                                 pending.retry_waiting = True
