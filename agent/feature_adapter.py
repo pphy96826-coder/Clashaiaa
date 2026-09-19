@@ -1344,6 +1344,11 @@ class FeatureAdapter:
             if cid == HOG_RIDER and hog_opportunity_lane is not None:
                 entry = self._mask_to_lane(
                     entry, hog_opportunity_lane, 'attack_opportunity_lane')
+                if (attack_opportunity is not None
+                        and attack_opportunity.get('kind') == 'counterpush'):
+                    # Preserve the older placement-mask diagnostic while the
+                    # unified context becomes the single source of truth.
+                    entry['counterpush_lane'] = hog_opportunity_lane
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
