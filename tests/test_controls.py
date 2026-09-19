@@ -7,7 +7,10 @@ from unittest.mock import Mock, call, patch
 from live_lifecycle import LiveLifecycle, LifecycleError
 from main import parse_args
 from runtime_console import AgentConsole, ConsoleCommand
-from desktop_console import ConsoleConfig, build_runner_command, config_from_dict, load_config, save_config
+from desktop_console import (
+    ConsoleConfig, build_runner_command, config_from_dict, load_config,
+    resolve_agent_python, save_config, validate_agent_python,
+)
 
 
 class ConsoleTests(unittest.TestCase):
@@ -44,12 +47,27 @@ class ConsoleTests(unittest.TestCase):
             expected = ConsoleConfig(
                 checkpoint='general', device='mps', continuous=False,
                 max_matches='', launch_mode='attach', log_path='/tmp/live.jsonl',
+                agent_python='/tmp/agent-python', auto_emotes=True,
             )
             save_config(expected, path)
             raw = json.loads(path.read_text(encoding='utf-8'))
             raw['future_field'] = 'ignored'
             path.write_text(json.dumps(raw), encoding='utf-8')
             self.assertEqual(load_config(path), expected)
+
+    def test_agent_python_prefers_saved_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'python'
+            executable.write_text('#!/bin/sh\n', encoding='utf-8')
+            executable.chmod(0o755)
+            self.assertEqual(resolve_agent_python(str(executable), Path(directory)), str(executable))
+
+    @patch('desktop_console.subprocess.run')
+    def test_agent_python_validation_reports_import_failure(self, run):
+        run.return_value = Mock(returncode=1, stderr='ModuleNotFoundError: native_runner', stdout='')
+        error = validate_agent_python('/tmp/agent-python', Path('/repo'))
+        self.assertIn('native_runner', error)
+        self.assertIn('native_runner', run.call_args.args[0][2])
 
     def test_config_from_dict_falls_back_for_invalid_values(self):
         loaded = config_from_dict({'continuous': 'yes', 'launch_mode': 'invalid', 'device': 3})

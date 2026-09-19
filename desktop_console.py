@@ -49,6 +49,8 @@ class ConsoleConfig:
     max_matches: str = ""
     launch_mode: str = "start"
     log_path: str = ""
+    agent_python: str = ""
+    auto_emotes: bool = False
 
 
 def config_from_dict(data: Any) -> ConsoleConfig:
@@ -59,7 +61,7 @@ def config_from_dict(data: Any) -> ConsoleConfig:
     values: dict[str, Any] = {}
     for field in fields(ConsoleConfig):
         value = data.get(field.name, getattr(defaults, field.name))
-        if field.name == "continuous":
+        if field.name in {"continuous", "auto_emotes"}:
             if not isinstance(value, bool):
                 value = getattr(defaults, field.name)
         elif not isinstance(value, str):
@@ -90,16 +92,41 @@ def save_config(config: ConsoleConfig, path: Path | str | None = None) -> Path:
     return path
 
 
-def resolve_python(root: Path = ROOT) -> Path:
-    """Choose the project virtualenv when present, otherwise this interpreter."""
-    override = os.environ.get("CR_AGENT_PYTHON")
-    if override:
-        return Path(override).expanduser()
+def resolve_agent_python(saved_python: str | None = None, root: Path = ROOT) -> str:
+    """Select an executable that belongs to the Agent environment."""
     candidates = (
-        root / ".venv" / "bin" / "python",
-        root / ".venv" / "Scripts" / "python.exe",
+        saved_python,
+        os.environ.get("CR_AGENT_PYTHON"),
+        str(Path.home() / "Documents/Codex/RoyaleHarness/.venv/bin/python"),
+        str(root / ".venv" / "bin" / "python"),
+        str(root / ".venv" / "Scripts" / "python.exe"),
+        sys.executable,
     )
-    return next((candidate for candidate in candidates if candidate.is_file()), Path(sys.executable))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    raise RuntimeError("没有找到可用的 Agent Python 解释器")
+
+
+def validate_agent_python(agent_python: str, root: Path = ROOT) -> str | None:
+    """Return a human readable import error, or None when the environment works."""
+    command = (
+        "import config,sys; sys.path.insert(0,str(config.FIRSTLIGHT_DIR)); "
+        "import native_runner, torch"
+    )
+    try:
+        result = subprocess.run(
+            [agent_python, "-c", command], cwd=root, env=runner_environment(),
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return str(exc)
+    if result.returncode:
+        return (result.stderr or result.stdout or "环境导入失败").strip()
+    return None
 
 
 def _validate_max_matches(value: str, continuous: bool) -> str:
@@ -126,7 +153,7 @@ def build_runner_command(
     if config.launch_mode not in {"start", "attach"}:
         raise ValueError("launch_mode must be start or attach")
     command = [
-        str(python_executable or resolve_python(root)),
+        str(python_executable or resolve_agent_python(config.agent_python, root)),
         "-u",
         str(root / "main.py"),
         "--checkpoint",
@@ -189,6 +216,8 @@ class RoyaleHarnessConsole:
         self.max_matches = tk.StringVar(value=saved.max_matches)
         self.launch_mode = tk.StringVar(value=saved.launch_mode)
         self.log_path = tk.StringVar(value=saved.log_path)
+        self.agent_python = tk.StringVar(value=saved.agent_python)
+        self.auto_emotes = tk.BooleanVar(value=saved.auto_emotes)
         self.status = tk.StringVar(value="未运行")
         self.pid = tk.StringVar(value="—")
         self.last_decision = tk.StringVar(value="等待模型启动")
@@ -222,6 +251,11 @@ class RoyaleHarnessConsole:
         self.resume_button.grid(row=0, column=4, padx=4, pady=4, sticky="ew")
         self.status_button = ttk.Button(controls, text="刷新状态", command=lambda: self.send("status"), state=tk.DISABLED)
         self.status_button.grid(row=0, column=5, padx=4, pady=4, sticky="ew")
+        self.auto_emotes_check = ttk.Checkbutton(
+            controls, text="自动发表情", variable=self.auto_emotes,
+            command=self.toggle_auto_emotes,
+        )
+        self.auto_emotes_check.grid(row=1, column=0, columnspan=2, padx=4, pady=4, sticky="w")
         for column in range(6):
             controls.columnconfigure(column, weight=1)
 
@@ -252,9 +286,13 @@ class RoyaleHarnessConsole:
                 settings, text=label, variable=self.launch_mode, value=value,
                 command=self._update_launch_controls,
             ).grid(row=2, column=index, sticky="w", padx=4, pady=4)
-        ttk.Label(settings, text="日志文件").grid(row=3, column=0, sticky="w", padx=4, pady=4)
-        ttk.Entry(settings, textvariable=self.log_path).grid(row=3, column=1, columnspan=2, sticky="ew", padx=4, pady=4)
-        ttk.Button(settings, text="选择…", command=self.choose_log_path).grid(row=3, column=3, sticky="e", padx=4, pady=4)
+        ttk.Label(settings, text="Python 解释器").grid(row=3, column=0, sticky="w", padx=4, pady=4)
+        self.agent_python_box = ttk.Entry(settings, textvariable=self.agent_python)
+        self.agent_python_box.grid(row=3, column=1, columnspan=2, sticky="ew", padx=4, pady=4)
+        ttk.Button(settings, text="选择…", command=self.choose_agent_python).grid(row=3, column=3, sticky="e", padx=4, pady=4)
+        ttk.Label(settings, text="日志文件").grid(row=4, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(settings, textvariable=self.log_path).grid(row=4, column=1, columnspan=2, sticky="ew", padx=4, pady=4)
+        ttk.Button(settings, text="选择…", command=self.choose_log_path).grid(row=4, column=3, sticky="e", padx=4, pady=4)
         for column in (1, 3):
             settings.columnconfigure(column, weight=1)
 
@@ -286,9 +324,10 @@ class RoyaleHarnessConsole:
 
     def _set_running(self, running: bool) -> None:
         field_state = tk.DISABLED if running else tk.NORMAL
-        for widget in (self.checkpoint_box, self.device_box, self.max_matches_entry):
+        for widget in (self.checkpoint_box, self.device_box, self.max_matches_entry, self.agent_python_box):
             widget.configure(state=field_state)
         self.continuous_check.configure(state=field_state)
+        self.auto_emotes_check.configure(state=tk.DISABLED if self.closing else tk.NORMAL)
         self.start_button.configure(state=tk.DISABLED if running else tk.NORMAL)
         for button in (self.stop_button, self.force_stop_button, self.pause_button, self.resume_button, self.status_button):
             button.configure(state=tk.NORMAL if running else tk.DISABLED)
@@ -387,11 +426,17 @@ class RoyaleHarnessConsole:
             checkpoint=self.checkpoint.get(), device=self.device.get(),
             continuous=self.continuous.get(), max_matches=self.max_matches.get(),
             launch_mode=self.launch_mode.get(), log_path=self.log_path.get(),
+            agent_python=self.agent_python.get(), auto_emotes=self.auto_emotes.get(),
         )
         try:
-            command = build_runner_command(config, root=ROOT)
+            agent_python = resolve_agent_python(config.agent_python, ROOT)
+            error = validate_agent_python(agent_python, ROOT)
+            if error:
+                raise RuntimeError(f"Agent Python 环境不可用：\n{error}")
+            config.agent_python = agent_python
+            command = build_runner_command(config, root=ROOT, python_executable=agent_python)
             save_config(config, self.config_path)
-        except (OSError, ValueError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             messagebox.showerror("启动参数错误", str(exc))
             return
         try:
@@ -424,6 +469,17 @@ class RoyaleHarnessConsole:
         ]
         for thread in self.reader_threads:
             thread.start()
+        if self.auto_emotes.get():
+            self.root.after(500, self._apply_auto_emotes)
+
+    def _apply_auto_emotes(self) -> None:
+        if self.process is not None and self.auto_emotes.get():
+            self.send("emote auto")
+
+    def toggle_auto_emotes(self) -> None:
+        if self.process is not None:
+            self.send("emote auto" if self.auto_emotes.get() else "emote off")
+            self.status.set("自动表情已开启" if self.auto_emotes.get() else "自动表情已关闭")
 
     def send(self, command: str) -> None:
         process = self.process
@@ -463,6 +519,11 @@ class RoyaleHarnessConsole:
         if path:
             self.log_path.set(path)
 
+    def choose_agent_python(self) -> None:
+        path = filedialog.askopenfilename(title="选择 Agent Python 解释器")
+        if path:
+            self.agent_python.set(path)
+
     def close(self) -> None:
         if self.closing:
             return
@@ -472,6 +533,7 @@ class RoyaleHarnessConsole:
                 checkpoint=self.checkpoint.get(), device=self.device.get(),
                 continuous=self.continuous.get(), max_matches=self.max_matches.get(),
                 launch_mode=self.launch_mode.get(), log_path=self.log_path.get(),
+                agent_python=self.agent_python.get(), auto_emotes=self.auto_emotes.get(),
             ), self.config_path)
         except OSError:
             pass

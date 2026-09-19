@@ -1,5 +1,6 @@
 * text=auto eol=lf
 *.bat text eol=crlf
+*.command text eol=lf
 *.so binary
 *.pt binary
 *.gz binary
