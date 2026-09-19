@@ -203,15 +203,23 @@ class LiveLifecycle:
     def close(self) -> None:
         self.touch.close()
 
-    def start_battle(self) -> None:
+    def start_battle(self, *, ensure_lobby=True) -> None:
         # A restarted guest can leave a TCP forward open while the injected
-        # listener is still dead.  Recover the control lane before RESET so a
+        # listener is still dead. Recover the control lane before RESET so a
         # startup race cannot abort the runner before the UI becomes usable.
         self.recover_runtime()
+        # A fully automatic run may be launched while the previous result or
+        # reward screen is still visible. Confirm/dismiss that UI before the
+        # battle tap. After a terminal transition main.py has already done
+        # this once, so the next-match path can explicitly skip the duplicate
+        # visual wait.
+        if ensure_lobby:
+            self.return_to_lobby(timeout_seconds=20.0)
         self.probe.reset_live_context()
         self._tap(self.calibration['battle_button'], 'battle')
         self.probe.arm_live_context()
-        self.log('battle_requested', mode='continuous')
+        self.log('battle_requested', mode='continuous',
+                 lobby_confirmed=bool(ensure_lobby))
 
     def attach_active(self) -> None:
         self.probe.attach_live_context()
