@@ -1056,6 +1056,52 @@ class ExecutorTests(unittest.TestCase):
         self.assertGreaterEqual(acks[0]['latency_ms'], 0)
         self.assertGreaterEqual(acks[0]['input_to_ack_ms'], 0)
 
+    def test_card_ack_window_survives_stale_frame_past_legacy_timeout(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0])
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = now - 0.65
+        pending.input_completed_at = now - 0.50
+        pending.prior_elixir = s.elixir
+        pending.ack_timeout_seconds = self.executor._card_ack_timeout_seconds()
+        self.assertGreater(
+            pending.ack_timeout_seconds,
+            config.ACK_TIMEOUT_SECONDS,
+        )
+        self.executor.ack_watch.append(pending)
+
+        # A fresh post-input frame can still carry the old hand well after the
+        # former 350ms deadline.  Keep watching only this slot.
+        s.tick += 1
+        s.received_at = now - 0.05
+        self.executor.poll(s, lambda *_: True)
+        self.assertEqual(self.executor.ack_watch, [pending])
+        self.assertNotIn('action_missed', [event for event, _ in self.events])
+
+        # The following authoritative hand frame confirms the same command.
+        s.tick += 1
+        s.hand_cards[0] = 0
+        s.received_at = time.perf_counter()
+        self.executor.poll(s, lambda *_: True)
+        self.assertFalse(self.executor.ack_watch)
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(len(acks), 1)
+        self.assertEqual(acks[0]['evidence'], 'hand_rotation')
+
+    def test_card_ack_timeout_adapts_but_stays_bounded(self):
+        self.executor._ack_latency_samples_ms[:] = [720.0, 880.0, 960.0]
+        self.executor.end_to_end_latency_ms = 180.0
+
+        timeout = self.executor._card_ack_timeout_seconds()
+
+        self.assertGreaterEqual(timeout, 1.0)
+        self.assertLessEqual(timeout, config.CARD_ACK_TIMEOUT_MAX_SECONDS)
+        self.assertGreaterEqual(timeout, 1.14)
+
     def test_completed_input_ack_watch_allows_different_slot(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
@@ -1362,7 +1408,11 @@ class ExecutorTests(unittest.TestCase):
         self.executor.submit(SimpleNamespace(actions=(first,)), s)
         pending = self.executor.pending[0]
         pending.state = 'sent'
-        pending.sent_at = time.perf_counter() - config.ACK_TIMEOUT_SECONDS - 0.1
+        pending.sent_at = (
+            time.perf_counter()
+            - self.executor._card_ack_timeout_seconds()
+            - 0.1
+        )
         pending.sent_tick = s.tick
         pending.prior_elixir = s.elixir
         s.tick += 1
@@ -1383,7 +1433,11 @@ class ExecutorTests(unittest.TestCase):
         self.executor.submit(SimpleNamespace(actions=(first,)), s)
         pending = self.executor.pending[0]
         pending.state = 'sent'
-        pending.sent_at = time.perf_counter() - config.ACK_TIMEOUT_SECONDS - 0.1
+        pending.sent_at = (
+            time.perf_counter()
+            - self.executor._card_ack_timeout_seconds()
+            - 0.1
+        )
         pending.sent_tick = s.tick
         pending.prior_elixir = s.elixir
         self.executor.predictions.append({
@@ -1405,7 +1459,11 @@ class ExecutorTests(unittest.TestCase):
         self.executor.submit(SimpleNamespace(actions=(first,)), s)
         pending = self.executor.pending[0]
         pending.state = 'sent'
-        pending.sent_at = time.perf_counter() - config.ACK_TIMEOUT_SECONDS - 0.1
+        pending.sent_at = (
+            time.perf_counter()
+            - self.executor._card_ack_timeout_seconds()
+            - 0.1
+        )
         pending.sent_tick = s.tick
         pending.prior_elixir = s.elixir
         s.tick += 1
