@@ -39,8 +39,11 @@ from bridge.projectile_origin import ProjectileOrigins
 from bridge.reference_events import ReferenceEvents
 
 HOG_26_DECK = (26000010, 26000014, 26000021, 26000030, 26000038, 27000000, 28000000, 28000011)
+HOG_RIDER = 26000021
 MINER = 26000032
 DEFENSIVE_LANE_CARDS = frozenset((26000010, 26000014, 26000030, 26000038, 27000000))
+ATTACK_HOLD_TOWER_DISTANCE = 7000.0
+ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR = 8.0
 
 # Conservative impact envelopes in native world units.  They are deliberately
 # wider than the visual effect so a delayed spell cannot wake an inactive king
@@ -533,6 +536,60 @@ class FeatureAdapter:
                 return True
         return False
 
+    def _attack_hold_context(self, effective_elixir):
+        """Conservatively hold Hog when a live enemy is already near our tower.
+
+        This is a macro safety gate, not an attack recommender.  It only
+        suppresses the win condition when committing four elixir would leave
+        too little budget to answer an immediate near-tower threat.
+        """
+        if float(effective_elixir) >= ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR:
+            return None
+        own_towers = [
+            tower for tower in self._towers.values()
+            if tower.owner == self.actor_owner and tower.hitpoints > 0
+        ]
+        if not own_towers:
+            return None
+
+        best = None
+        for ent in self._live_entities.values():
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+            if int(ent.get('card_id', -1)) <= 0:
+                continue
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+            ex, ey = probe_to_world(ent['x'], ent['y'])
+            nearest = min(
+                own_towers,
+                key=lambda tower: (
+                    (tower.position[0] - ex) ** 2 +
+                    (tower.position[1] - ey) ** 2
+                ),
+            )
+            distance = math.sqrt(
+                (nearest.position[0] - ex) ** 2 +
+                (nearest.position[1] - ey) ** 2
+            )
+            if best is None or distance < best['distance']:
+                best = {
+                    'distance': distance,
+                    'enemy_id': int(ent['id']),
+                    'tower_id': int(nearest.entity_id),
+                }
+
+        if best is None or best['distance'] > ATTACK_HOLD_TOWER_DISTANCE:
+            return None
+        return {
+            'reason': 'near_tower_defense',
+            'distance': best['distance'],
+            'enemy_id': best['enemy_id'],
+            'tower_id': best['tower_id'],
+            'required_effective_elixir': ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR,
+        }
+
     def _single_defensive_threat_lane(self):
         """Return one unambiguous nearby enemy lane, otherwise None."""
         enemy = []
@@ -891,6 +948,11 @@ class FeatureAdapter:
         defensive_lane_gate = self._single_defensive_threat_lane()
         self.quality['defensive_threat_lane'] = (
             defensive_lane_gate['threat_lane'] if defensive_lane_gate else None)
+        attack_hold = self._attack_hold_context(elixir)
+        self.quality['attack_hold_reason'] = (
+            attack_hold['reason'] if attack_hold else None)
+        self.quality['attack_hold_distance'] = (
+            attack_hold['distance'] if attack_hold else None)
         for slot, cid in slots.items():
             spec = self.bundle.card_specs[cid]
             if selections is not None:
@@ -919,6 +981,9 @@ class FeatureAdapter:
             if elixir < spec.elixir_cost:
                 slot_reasons[str(slot)] = 'insufficient_elixir'
                 continue
+            if cid == HOG_RIDER and attack_hold is not None:
+                slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
+                continue
             entry = self.build_placement_mask(cid, lanes, towers, entities,
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
                 ability_hud=ability_hud)
@@ -946,7 +1011,13 @@ class FeatureAdapter:
                      'slot_reasons': slot_reasons,
                      'defensive_threat_lane': (
                          defensive_lane_gate['threat_lane']
-                         if defensive_lane_gate else None)})
+                         if defensive_lane_gate else None),
+                     'attack_hold_reason': (
+                         attack_hold['reason'] if attack_hold else None),
+                     'attack_hold_distance': (
+                         attack_hold['distance'] if attack_hold else None),
+                     'attack_hold_enemy_id': (
+                         attack_hold['enemy_id'] if attack_hold else None)})
         crowns = {}
         for owner in (0, 1):
             enemy = [t for t in towers if t.owner != owner]
