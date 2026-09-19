@@ -32,6 +32,8 @@ class PendingAction:
     ack_timeout_seconds: float = 0.0
     prior_cycle: tuple[int, ...] | None = None
     prior_raw_hand_card: int | None = None
+    retry_count: int = 0
+    retry_probe_tick: int = -1
 
 
 @dataclass(frozen=True)
@@ -1204,6 +1206,63 @@ class ActionExecutor:
                                  card=action.card_id,
                                  reason='background_hand_ack')
                 elif now - ack_started_at > ack_timeout_seconds:
+                    # One completed card touch that reaches the ACK deadline
+                    # without *any* consumption evidence gets exactly one
+                    # second chance, but only after a newer authoritative
+                    # probe frame. Keeping the row on ACK watch during this
+                    # one-frame probe also lets a late hand/cycle transition
+                    # win normally instead of being mistaken for a miss.
+                    if (action.kind.value == 'play_card'
+                            and getattr(pending, 'retry_count', 0) < 1):
+                        retry_probe_tick = int(
+                            getattr(pending, 'retry_probe_tick', -1))
+                        if retry_probe_tick < 0:
+                            pending.retry_probe_tick = int(state.tick)
+                            self._fresh_state_required = True
+                            self.log('action_retry_armed',
+                                     card=action.card_id,
+                                     slot=action.hand_slot,
+                                     command_seq=pending.command_seq,
+                                     tick=state.tick,
+                                     ack_timeout_ms=round(
+                                         ack_timeout_seconds * 1000),
+                                     retry_count=pending.retry_count + 1)
+                            continue
+                        if int(state.tick) <= retry_probe_tick:
+                            continue
+                        raw_hand_card = self._authoritative_hand_card(
+                            state, action.hand_slot, action.owner)
+                        current_cycle = self._native_cycle(
+                            state, action.owner)
+                        same_hand = (
+                            raw_hand_card is not None
+                            and int(raw_hand_card) == hand_baseline
+                        )
+                        same_cycle = (
+                            getattr(pending, 'prior_cycle', None) is None
+                            or current_cycle == getattr(
+                                pending, 'prior_cycle', None)
+                        )
+                        if same_hand and same_cycle:
+                            self.ack_watch.remove(pending)
+                            pending.state = 'queued'
+                            pending.retry_count += 1
+                            pending.retry_probe_tick = -1
+                            pending.due = now
+                            pending.expires = (
+                                now + config.ACTION_MAX_LATENESS_SECONDS)
+                            pending.input_completed_at = 0.0
+                            pending.ack_timeout_seconds = 0.0
+                            self.pending.append(pending)
+                            self._drop_prediction(pending.command_seq)
+                            self.log('action_retry_queued',
+                                     card=action.card_id,
+                                     slot=action.hand_slot,
+                                     command_seq=pending.command_seq,
+                                     tick=state.tick,
+                                     retry_count=pending.retry_count,
+                                     evidence='fresh_unchanged_hand_and_cycle')
+                            continue
                     self.ack_watch.remove(pending)
                     # A missing ACK is ambiguous: the touch may have reached
                     # the game while telemetry was late.  Keep its virtual
@@ -1322,9 +1381,14 @@ class ActionExecutor:
                 self._raw_hand_card(state, action.hand_slot, action.owner)
                 if not skill else None
             )
+            # A retry reuses the same logical command so resource accounting
+            # remains single-counted. Refresh that reservation timestamp
+            # instead of stacking a second virtual spend for the same card.
+            self._clear_spend(pending.command_seq)
             self.unconfirmed_spend.append((now, pending.cost, pending.command_seq))
             prediction_lifetime = (config.PREDICTION_LATENCY_COMPENSATION_MS / 1000.0
                                    + config.PREDICTION_HORIZON_TICKS * config.TICK_SECONDS + 0.4)
+            self._drop_prediction(pending.command_seq)
             self.predictions.append({'action': action, 'command_seq': pending.command_seq,
                                      'expires_at': now + prediction_lifetime})
             pending.prior_entities = frozenset(e['id'] for e in state.entities)
@@ -1347,6 +1411,7 @@ class ActionExecutor:
                 validation_ms=(now-validation_started)*1000,
                 receive_to_input_submit_ms=(now-state.received_at)*1000,
                 ability=action.ability_id, source_entity=action.source_entity,
+                retry_count=getattr(pending, 'retry_count', 0),
                 screen=self.actuator.ability_screen(action) if skill else self.actuator.calibration.action_to_screen(action))
             break
 
