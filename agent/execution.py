@@ -526,6 +526,11 @@ class ActionExecutor:
         hard_expires_at = float(now) + float(config.SLOT_CONSUME_GUARD_MAX_SECONDS)
         self.slot_consume_guards[int(slot)] = {
             'card_id': int(pending.action.card_id or 0),
+            'raw_baseline_card': int(
+                pending.prior_raw_hand_card
+                if pending.prior_raw_hand_card is not None
+                else (pending.action.card_id or 0)
+            ),
             'command_seq': int(pending.command_seq),
             'evidence': str(evidence),
             'soft_expires_at': soft_expires_at,
@@ -549,8 +554,12 @@ class ActionExecutor:
         self._apply_slot_hand_overrides(state)
         for slot, guard in list(self.slot_consume_guards.items()):
             card_id = int(guard['card_id'])
+            raw_baseline_card = int(guard.get('raw_baseline_card', card_id))
             raw_card = self._raw_hand_card(state, slot)
-            rotated = raw_card is not None and int(raw_card) != card_id
+            rotated = (
+                raw_card is not None
+                and int(raw_card) != raw_baseline_card
+            )
             soft_expired = now >= float(guard['soft_expires_at'])
             hard_expired = now >= float(guard['hard_expires_at'])
             if rotated:
@@ -568,7 +577,7 @@ class ActionExecutor:
                 del self.slot_consume_guards[slot]
                 self._clear_spend(int(guard['command_seq']))
                 if self._recover_slot_override(
-                        state, slot, card_id, guard['command_seq'],
+                        state, slot, raw_baseline_card, guard['command_seq'],
                         replacement_card=inferred):
                     continue
             if not soft_expired:
