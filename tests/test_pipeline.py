@@ -1132,6 +1132,58 @@ class ExecutorTests(unittest.TestCase):
             prior_cycle[0],
         )
 
+    def test_cycle_override_advances_after_second_play_from_same_stale_raw_slot(self):
+        s = state()
+        player = next(p for p in s.raw['players'] if p['owner'] == s.local_owner)
+        stale_card = s.hand_cards[0]
+        first_cycle = tuple(player['cycle'])
+
+        # The first consume is already proven by native cycle, while the raw
+        # hand slot is still stuck on the original source card.
+        player['cycle'] = list(first_cycle[1:]) + [stale_card]
+        self.executor._recover_slot_override(
+            s, 0, stale_card, 70,
+            replacement_card=first_cycle[0],
+            evidence='native_cycle_transition',
+        )
+        self.assertEqual(s.hand_cards[0], first_cycle[0])
+        self.assertNotIn(0, self.executor.blocked_slots(s))
+
+        second = play(slot=0, card=first_cycle[0])
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertEqual(len(self.executor.pending), 1)
+        pending = self.executor.pending.pop(0)
+        now = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_tick = s.tick
+        pending.sent_at = now - 0.10
+        pending.input_completed_at = now - 0.05
+        pending.prior_elixir = s.elixir
+        pending.prior_cycle = tuple(player['cycle'])
+        pending.prior_raw_hand_card = stale_card
+        pending.ack_timeout_seconds = config.CARD_ACK_TIMEOUT_BASE_SECONDS
+        self.executor.ack_watch.append(pending)
+        self.executor.unconfirmed_spend.append(
+            (now, pending.cost, pending.command_seq)
+        )
+
+        # A second exact cycle step advances the effective slot again even
+        # though the raw hand still has never left stale_card.
+        player['cycle'] = list(pending.prior_cycle[1:]) + [second.card_id]
+        s.tick += 1
+        s.received_at = now + 0.01
+        self.executor.poll(s, lambda *_: True)
+
+        self.assertFalse(self.executor.ack_watch)
+        self.assertEqual(s.hand_cards[0], pending.prior_cycle[0])
+        self.assertEqual(
+            self.executor.slot_hand_overrides[0]['card_id'],
+            pending.prior_cycle[0],
+        )
+        self.assertNotIn(0, self.executor.blocked_slots(s))
+        acks = [data for event, data in self.events if event == 'hand_ack']
+        self.assertEqual(acks[-1]['evidence'], 'native_cycle_transition')
+
     def test_unrelated_cycle_change_never_recovers_stale_guard(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0])
@@ -1393,7 +1445,8 @@ class ExecutorTests(unittest.TestCase):
         self.assertTrue(stale[0]['slot_remains_blocked'])
         self.assertIn(0, self.executor.blocked_slots(s))
 
-        # Authoritative hand rotation is the only normal release condition.
+        # With no cycle proof in this fixture, authoritative hand rotation is
+        # the only safe release condition.
         s.hand_cards[0] = s.hand_cards[1]
         s.tick += 1
         self.assertNotIn(0, self.executor.blocked_slots(s))
