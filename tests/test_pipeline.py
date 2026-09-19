@@ -292,6 +292,35 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
 
+    def test_counterpush_opportunity_hides_lower_priority_attack_window(self):
+        a, s = self.adapter()
+        s.elixir = 5.0
+        s.entities.append({
+            'id': 9206,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 14500,
+            'y': 12000,
+            'hp': 700,
+            'max_hp': 1000,
+        })
+        a._recent_enemy_building_expiry = {
+            'entity_id': 9459,
+            'card_id': 27000000,
+            'tick': s.tick,
+        }
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'counterpush')
+        self.assertEqual(
+            o.action_mask.reasons['attack_opportunity_reason'],
+            'counterpush_support',
+        )
+        self.assertIsNone(o.action_mask.reasons['attack_window_reason'])
+        self.assertIsNone(o.action_mask.reasons['attack_window_card_id'])
+
     def test_near_tower_pressure_blocks_counterpush_phase(self):
         a, s = self.adapter()
         s.elixir = 9.0
