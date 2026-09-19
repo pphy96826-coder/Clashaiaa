@@ -26,12 +26,31 @@ class PendingAction:
     prior_elixir: float | None = None
     decision_at: float = 0.0
     observation_received_at: float = 0.0
+    threat_ids: frozenset = frozenset()
+    threat_target: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
+class ThreatReservation:
+    command_seq: int
+    owner: int
+    card_id: int
+    threat_ids: frozenset
+    target: tuple[float, float]
+    expires_at: float
 
 
 class ActionExecutor:
     # Keep input strictly serial. Card selection, placement and hand rotation
     # share one UI state; overlapping actions can make taps interfere.
     MAX_IN_FLIGHT_ACTIONS = 1
+
+    # Replace the global post-card stall only when a defensive play can be
+    # tied to one concrete live enemy.  A short reservation suppresses another
+    # card aimed at that same enemy while allowing immediate reactions to a
+    # different threat.
+    THREAT_RESERVATION_SECONDS = 0.9
+    THREAT_RESERVATION_RADIUS_WORLD = 6000.0
 
     def __init__(self, actuator, log, dry_run=False, on_ability_ack=None, max_actions=None):
         self.actuator, self.log, self.dry_run = actuator, log, dry_run
@@ -48,6 +67,7 @@ class ActionExecutor:
         self.cooldowns = {}
         self.unconfirmed_spend = []
         self.predictions = []
+        self.threat_reservations = []
         self.fault = None
         self.spawn_watch = []
         self.ability_locks = set()
@@ -72,6 +92,7 @@ class ActionExecutor:
         self.cooldowns.clear()
         self.unconfirmed_spend.clear()
         self.predictions.clear()
+        self.threat_reservations.clear()
         self.ability_locks.clear()
         self.fault = None
         self.attempted_actions = 0
@@ -167,6 +188,103 @@ class ActionExecutor:
     def _action_key(action):
         return (int(action.card_id or 0), int(action.hand_slot if action.hand_slot is not None else -1),
                 tuple(action.target_grid) if action.target_grid is not None else None)
+
+    @staticmethod
+    def _on_own_half(owner, y):
+        return float(y) <= 16000.0 if owner == 0 else float(y) >= 16000.0
+
+    @staticmethod
+    def _live_entity_ids(state):
+        return frozenset(
+            int(entity['id']) for entity in state.entities
+            if isinstance(entity.get('id'), int) and entity['id'] > 0
+            and isinstance(entity.get('hp'), (int, float)) and entity['hp'] > 0
+        )
+
+    def _nearby_threat_ids(self, action, state):
+        """Bind a defensive play to the nearest concrete enemy, if any.
+
+        The first version deliberately reserves one primary threat instead of
+        a whole lane/cluster.  That prevents duplicate answers to one Hog or
+        Balloon without suppressing legitimate layered defence against a push.
+        """
+        if action.kind.value != 'play_card' or action.target_grid is None:
+            return frozenset()
+        target_x, target_y = action_world(action)
+        if not self._on_own_half(action.owner, target_y):
+            return frozenset()
+        radius_sq = self.THREAT_RESERVATION_RADIUS_WORLD ** 2
+        candidates = []
+        for entity in state.entities:
+            if entity.get('owner') == action.owner:
+                continue
+            entity_id = entity.get('id')
+            card_id = entity.get('card_id')
+            hp = entity.get('hp')
+            x, y = entity.get('x'), entity.get('y')
+            # Towers use non-positive card ids in this contract; projectiles
+            # and effects either have no positive HP or no source card.
+            if not isinstance(entity_id, int) or entity_id <= 0:
+                continue
+            if not isinstance(card_id, int) or card_id <= 0:
+                continue
+            if not isinstance(hp, (int, float)) or hp <= 0:
+                continue
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                continue
+            if not self._on_own_half(action.owner, y):
+                continue
+            distance_sq = ((float(x) - target_x) ** 2
+                           + (float(y) - target_y) ** 2)
+            if distance_sq <= radius_sq:
+                candidates.append((distance_sq, entity_id))
+        if not candidates:
+            return frozenset()
+        return frozenset((min(candidates)[1],))
+
+    def _prune_threat_reservations(self, state, now=None):
+        now = time.perf_counter() if now is None else now
+        live_ids = self._live_entity_ids(state)
+        self.threat_reservations[:] = [
+            reservation for reservation in self.threat_reservations
+            if now < reservation.expires_at
+            and bool(reservation.threat_ids & live_ids)
+        ]
+
+    def _matching_threat_reservation(self, action, state):
+        now = time.perf_counter()
+        self._prune_threat_reservations(state, now)
+        threat_ids = self._nearby_threat_ids(action, state)
+        if not threat_ids:
+            return None, threat_ids
+        for reservation in reversed(self.threat_reservations):
+            if reservation.owner == action.owner and threat_ids == reservation.threat_ids:
+                return reservation, threat_ids
+        return None, threat_ids
+
+    def _commit_threat_reservation(self, pending, state, now):
+        if not pending.threat_ids or pending.threat_target is None:
+            return False
+        live_ids = self._live_entity_ids(state)
+        threat_ids = frozenset(pending.threat_ids & live_ids)
+        if not threat_ids:
+            return False
+        reservation = ThreatReservation(
+            command_seq=pending.command_seq,
+            owner=int(pending.action.owner),
+            card_id=int(pending.action.card_id or 0),
+            threat_ids=threat_ids,
+            target=pending.threat_target,
+            expires_at=now + self.THREAT_RESERVATION_SECONDS,
+        )
+        self.threat_reservations.append(reservation)
+        self.log('threat_reservation_started',
+                 command_seq=pending.command_seq,
+                 card=pending.action.card_id,
+                 threat_ids=sorted(threat_ids),
+                 target_world=list(pending.threat_target),
+                 ttl_ms=round(self.THREAT_RESERVATION_SECONDS * 1000))
+        return True
 
     def pause(self):
         # Drop stale plans, retain sent actions for ACK reconciliation on resume.
@@ -303,6 +421,19 @@ class ActionExecutor:
                 self.log('action_suppressed', reason='recent_miss_same_target',
                          action=action.to_dict(), remaining_ms=(miss_until-time.perf_counter())*1000)
                 continue
+            threat_ids = frozenset()
+            threat_target = None
+            if not skill:
+                reservation, threat_ids = self._matching_threat_reservation(action, state)
+                if reservation is not None:
+                    now = time.perf_counter()
+                    self.log('action_suppressed', reason='threat_already_committed',
+                             action=action.to_dict(), threat_ids=sorted(threat_ids),
+                             committed_by=reservation.command_seq,
+                             remaining_ms=max(0.0, (reservation.expires_at-now)*1000.0))
+                    continue
+                if threat_ids:
+                    threat_target = action_world(action)
             if state.elixir - self.reserved_elixir < cost:
                 self.log('action_rejected', reason='reserved_elixir', action=action.to_dict(),
                          elixir=state.elixir, reserved_elixir=self.reserved_elixir,
@@ -310,7 +441,8 @@ class ActionExecutor:
                 continue
             due = state.received_at + action.execute_offset_ticks * config.TICK_SECONDS
             pending = PendingAction(action, state.tick, due, due + config.ACTION_MAX_LATENESS_SECONDS,
-                cost, command_seq=self._next_command_seq, decision_at=time.perf_counter())
+                cost, command_seq=self._next_command_seq, decision_at=time.perf_counter(),
+                threat_ids=threat_ids, threat_target=threat_target)
             pending.observation_received_at = state.received_at
             self._next_command_seq += 1
             if self.dry_run:
@@ -449,7 +581,11 @@ class ActionExecutor:
                     self._confirmed_for_simulation.append((action, pending.sent_tick,
                                                            pending.command_seq))
                     self._fresh_state_required = True
-                    self._arm_post_action_recheck(state, pending, reason='hand_ack')
+                    # Clear defensive intent gets a local anti-overcommit gate;
+                    # ambiguous/non-defensive plays retain the conservative
+                    # global settle + preview fallback.
+                    if not self._commit_threat_reservation(pending, state, now):
+                        self._arm_post_action_recheck(state, pending, reason='hand_ack')
                 elif now - pending.sent_at > config.ACK_TIMEOUT_SECONDS:
                     self.pending.remove(pending)
                     # A missing ACK is ambiguous: the touch may have reached
