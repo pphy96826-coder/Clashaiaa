@@ -251,7 +251,9 @@ class AdapterTests(unittest.TestCase):
 
     def test_distant_enemy_does_not_hold_hog(self):
         a, s = self.adapter()
-        s.elixir = 6.0
+        # High elixir isolates the near-tower attack-hold rule from neutral
+        # patience, which intentionally throttles four-elixir commitments.
+        s.elixir = 9.0
         add_enemy(s, 9103, 3500, 16000, card_id=26000021)
         s.tick += 1
 
@@ -262,6 +264,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_surviving_support_opens_counterpush_phase_and_hog_lane(self):
         a, s = self.adapter()
+        s.elixir = 5.0
         s.entities.append({
             'id': 9201,
             'owner': s.local_owner,
@@ -276,6 +279,7 @@ class AdapterTests(unittest.TestCase):
         _, o = a.tensorize(s)
 
         self.assertEqual(o.action_mask.reasons['strategy_phase'], 'counterpush')
+        self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
         self.assertEqual(o.action_mask.reasons['counterpush_lane'], 'right')
         self.assertEqual(o.action_mask.reasons['counterpush_support_entity_id'], 9201)
         hog = o.action_mask.placement_masks['2']
@@ -326,6 +330,54 @@ class AdapterTests(unittest.TestCase):
         hog = o.action_mask.placement_masks['2']
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
+
+    def test_neutral_patience_holds_heavy_commitments_but_keeps_wait_and_cycle(self):
+        a, s = self.adapter()
+        s.elixir = 7.0
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertTrue(o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(o.action_mask.kinds['wait'])
+        self.assertTrue(o.action_mask.hand_slots[0])  # Skeletons stay available.
+        self.assertFalse(o.action_mask.hand_slots[1])  # Musketeer held.
+        self.assertFalse(o.action_mask.hand_slots[3])  # Hog held.
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_neutral_patience',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['3'],
+            'strategy_neutral_patience',
+        )
+
+    def test_neutral_patience_releases_near_elixir_cap(self):
+        a, s = self.adapter()
+        s.elixir = 8.5
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[3])
+
+    def test_defensive_pressure_immediately_releases_neutral_patience(self):
+        a, s = self.adapter()
+        s.elixir = 6.0
+        add_enemy(s, 9301, 3500, 11000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
+        # Attack-hold may still suppress Hog, but defensive resources must be
+        # restored immediately rather than waiting for 8.5 elixir.
+        self.assertTrue(o.action_mask.hand_slots[1])
 
     def test_missing_initial_towers_do_not_open_pockets(self):
         s = state()
