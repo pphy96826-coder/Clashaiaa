@@ -493,6 +493,7 @@ class ActionExecutor:
                 continue
             if int(raw_card) != stale_card:
                 del self.slot_hand_overrides[slot]
+                state.hand_cards[slot] = int(raw_card)
                 self.log('slot_hand_override_cleared',
                          command_seq=override['command_seq'],
                          slot=slot,
