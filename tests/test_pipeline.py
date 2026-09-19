@@ -1261,6 +1261,39 @@ class ExecutorTests(unittest.TestCase):
             config.CARD_ACK_TIMEOUT_MAX_SECONDS,
         )
 
+    def test_weak_ack_latencies_do_not_end_bootstrap(self):
+        self.executor.end_to_end_latency_ms = 100.0
+
+        self.executor._record_card_ack_latency(
+            240.0, evidence='elixir_cost_drop')
+        self.executor._record_card_ack_latency(
+            420.0, evidence='new_own_entity_near_target')
+        self.executor._record_card_ack_latency(
+            510.0, evidence='new_source_entity')
+
+        self.assertEqual(self.executor._ack_latency_samples_ms, [])
+        self.assertEqual(
+            self.executor._card_ack_timeout_seconds(),
+            config.CARD_ACK_TIMEOUT_MAX_SECONDS,
+        )
+
+    def test_strong_ack_latencies_drive_post_bootstrap_timeout(self):
+        self.executor.end_to_end_latency_ms = 100.0
+
+        self.executor._record_card_ack_latency(
+            800.0, evidence='hand_rotation')
+        self.executor._record_card_ack_latency(
+            900.0, evidence='native_cycle_transition')
+        self.executor._record_card_ack_latency(
+            1000.0, evidence='hand_rotation')
+
+        self.assertEqual(
+            self.executor._ack_latency_samples_ms,
+            [800.0, 900.0, 1000.0],
+        )
+        self.assertAlmostEqual(
+            self.executor._card_ack_timeout_seconds(), 1.18, places=6)
+
     def test_card_ack_timeout_returns_to_adaptive_floor_after_bootstrap(self):
         self.executor._ack_latency_samples_ms[:] = [420.0, 510.0, 620.0]
         self.executor.end_to_end_latency_ms = 100.0
