@@ -262,6 +262,126 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.hand_slots[2])
         self.assertIsNone(o.action_mask.reasons['attack_hold_reason'])
 
+    def test_backfield_heavy_unit_immediately_prepares_defense_and_punish_lane(self):
+        a, s = self.adapter()
+        s.elixir = 10.0
+        # Giant is a five-elixir troop.  A left-lane backfield deployment is
+        # public intent well before it crosses into our defensive half.
+        add_enemy(s, 9191, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'prepare_defense')
+        self.assertTrue(o.action_mask.reasons['incoming_push_active'])
+        self.assertEqual(o.action_mask.reasons['incoming_push_lane'], 'left')
+        self.assertEqual(o.action_mask.reasons['incoming_push_card_id'], 26000003)
+        self.assertGreaterEqual(o.action_mask.reasons['incoming_push_cost'], 5.0)
+        self.assertTrue(o.action_mask.reasons['incoming_push_reserve_defenders'])
+        self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
+
+        # Musketeer is preserved while the core is still deep in the back,
+        # but cheap cycle remains legal so preparation cannot force overflow.
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_reserve_incoming_push',
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+
+        # At high elixir, Hog may punish the opposite lane instead of idling,
+        # while the reserved defender remains untouched.
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['attack_opportunity_kind'],
+            'heavy_commit',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['attack_opportunity_reason'],
+            'opponent_backfield_heavy_commit',
+        )
+        self.assertEqual(o.action_mask.reasons['attack_opportunity_lane'], 'right')
+        hog = o.action_mask.placement_masks['2']
+        self.assertFalse(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
+        self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
+
+    def test_backfield_heavy_unit_blocks_low_elixir_hog_but_keeps_cycle(self):
+        a, s = self.adapter()
+        s.elixir = 6.0
+        add_enemy(s, 9192, 14500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'prepare_defense')
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_hold_incoming_push',
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.reasons['attack_opportunity_active'])
+
+    def test_incoming_push_releases_and_lanes_cannon_as_core_approaches(self):
+        raw = opening()
+        hand = (27000000, 26000010, 26000021, 26000030)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'incoming-push-cannon')
+        add_enemy(s, 9193, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+
+        _, far = a.tensorize(s)
+        self.assertFalse(far.action_mask.hand_slots[0])
+        self.assertEqual(
+            far.action_mask.reasons['slot_reasons']['0'],
+            'strategy_reserve_incoming_push',
+        )
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9193)
+        giant['y'] = 17500
+        s.tick += 1
+        _, near = a.tensorize(s)
+
+        self.assertEqual(near.action_mask.reasons['strategy_phase'], 'prepare_defense')
+        self.assertTrue(near.action_mask.reasons['incoming_push_active'])
+        self.assertFalse(near.action_mask.reasons['incoming_push_reserve_defenders'])
+        self.assertTrue(near.action_mask.hand_slots[0])
+        cannon = near.action_mask.placement_masks['0']
+        self.assertEqual(cannon['incoming_push_lane'], 'left')
+        self.assertTrue(any(row[x] for row in cannon['row_major'] for x in range(0, 9)))
+        self.assertFalse(any(row[x] for row in cannon['row_major'] for x in range(9, 18)))
+
+    def test_incoming_push_suppresses_stale_counterpush_bias(self):
+        a, s = self.adapter()
+        s.elixir = 9.0
+        s.entities.append({
+            'id': 9194,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 14500,
+            'y': 12000,
+            'hp': 700,
+            'max_hp': 1000,
+        })
+        add_enemy(s, 9195, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'prepare_defense')
+        self.assertIsNone(o.action_mask.reasons['counterpush_lane'])
+        self.assertEqual(
+            o.action_mask.reasons['attack_opportunity_kind'],
+            'heavy_commit',
+        )
+
     def test_surviving_support_opens_counterpush_phase_and_hog_lane(self):
         a, s = self.adapter()
         s.elixir = 5.0
