@@ -63,6 +63,23 @@ class ActionExecutor:
     THREAT_RESERVATION_CONFIRMED_SECONDS = 0.85
     THREAT_RESERVATION_UNCERTAIN_SECONDS = 0.70
     THREAT_RESERVATION_RADIUS_WORLD = 6000.0
+    # A single enemy play can create several tightly packed bodies (Goblin
+    # Barrel/Gang-style threats). Reserving only the nearest entity lets the
+    # next policy frame bind to a sibling and spend another defender on the
+    # same already-answered play. Group only nearby bodies with the same
+    # runtime card identity; unrelated push units remain independently
+    # defendable.
+    THREAT_COHORT_RADIUS_WORLD = 2800.0
+    # Provisional protection must bridge the entire hand-ACK window. Otherwise
+    # a slow hand frame opens a gap between input completion and confirmed
+    # reservation where a second card can be committed to the same threat.
+    THREAT_PROVISIONAL_ACK_GRACE_SECONDS = 0.30
+    # Spells have no durable own spawn to make their effect immediately
+    # visible. Keep the local threat reserved slightly longer after a confirmed
+    # spell consume; the reservation still disappears immediately when every
+    # bound enemy body is gone.
+    SPELL_THREAT_RESERVATION_CONFIRMED_SECONDS = 1.35
+    SPELL_THREAT_RESERVATION_UNCERTAIN_SECONDS = 1.10
 
     def __init__(self, actuator, log, dry_run=False, on_ability_ack=None, max_actions=None):
         self.actuator, self.log, self.dry_run = actuator, log, dry_run
@@ -296,11 +313,14 @@ class ActionExecutor:
         )
 
     def _nearby_threat_ids(self, action, state):
-        """Bind a defensive play to the nearest concrete enemy, if any.
+        """Bind a defensive play to one local enemy play/cohort, if possible.
 
-        The first version deliberately reserves one primary threat instead of
-        a whole lane/cluster.  That prevents duplicate answers to one Hog or
-        Balloon without suppressing legitimate layered defence against a push.
+        A multi-body threat must not evade the reservation simply because the
+        next frame chooses a different sibling as the nearest entity. Start
+        from the nearest concrete enemy, then include only tightly packed
+        enemies with the same runtime card identity. This keeps Goblin
+        Barrel/Gang-style bodies together without turning a mixed push into one
+        giant reservation.
         """
         if action.kind.value != 'play_card' or action.target_grid is None:
             return frozenset()
@@ -331,10 +351,23 @@ class ActionExecutor:
             distance_sq = ((float(x) - target_x) ** 2
                            + (float(y) - target_y) ** 2)
             if distance_sq <= radius_sq:
-                candidates.append((distance_sq, entity_id))
+                candidates.append((distance_sq, entity_id, card_id,
+                                   float(x), float(y)))
         if not candidates:
             return frozenset()
-        return frozenset((min(candidates)[1],))
+
+        _, primary_id, primary_card, primary_x, primary_y = min(
+            candidates, key=lambda row: (row[0], row[1]))
+        cohort_radius_sq = self.THREAT_COHORT_RADIUS_WORLD ** 2
+        cohort = {
+            int(entity_id)
+            for _, entity_id, card_id, x, y in candidates
+            if int(card_id) == int(primary_card)
+            and (x - primary_x) ** 2 + (y - primary_y) ** 2
+                <= cohort_radius_sq
+        }
+        cohort.add(int(primary_id))
+        return frozenset(cohort)
 
     def _prune_threat_reservations(self, state, now=None):
         now = time.perf_counter() if now is None else now
@@ -352,7 +385,8 @@ class ActionExecutor:
         if not threat_ids:
             return None, threat_ids
         for reservation in reversed(self.threat_reservations):
-            if reservation.owner == action.owner and threat_ids == reservation.threat_ids:
+            if (reservation.owner == action.owner
+                    and bool(threat_ids & reservation.threat_ids)):
                 return reservation, threat_ids
         return None, threat_ids
 
@@ -368,6 +402,34 @@ class ActionExecutor:
             'confirmed': self.THREAT_RESERVATION_CONFIRMED_SECONDS,
             'uncertain': self.THREAT_RESERVATION_UNCERTAIN_SECONDS,
         }.get(confidence, self.THREAT_RESERVATION_CONFIRMED_SECONDS)
+
+        # Do not let provisional protection expire while the same card is
+        # still legitimately waiting for its hand/cycle ACK. This closes the
+        # duplicate-defence gap seen on slow telemetry.
+        if confidence == 'provisional':
+            ack_budget = float(
+                getattr(pending, 'ack_timeout_seconds', 0.0) or 0.0)
+            ttl = max(
+                ttl,
+                ack_budget + self.THREAT_PROVISIONAL_ACK_GRACE_SECONDS,
+            )
+
+        # Spell effects are visible later than card consumption and do not
+        # provide an own spawned unit as immediate evidence. Give them a
+        # longer local outcome window, while still pruning as soon as the
+        # reserved enemy cohort is actually gone.
+        card_family = int(pending.action.card_id or 0) // 1_000_000
+        if card_family == 28:
+            if confidence == 'confirmed':
+                ttl = max(
+                    ttl,
+                    self.SPELL_THREAT_RESERVATION_CONFIRMED_SECONDS,
+                )
+            elif confidence == 'uncertain':
+                ttl = max(
+                    ttl,
+                    self.SPELL_THREAT_RESERVATION_UNCERTAIN_SECONDS,
+                )
         reservation = ThreatReservation(
             command_seq=pending.command_seq,
             owner=int(pending.action.owner),
