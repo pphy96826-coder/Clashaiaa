@@ -1997,8 +1997,9 @@ class ExecutorTests(unittest.TestCase):
         s = state()
         pending = self._reserve_spell_swarm(s)
 
-        # One sibling disappearing must not change the cohort identity enough
-        # to reopen defence on the remaining bodies.
+        # Immediately after the first answer, a sibling becoming the nearest
+        # target must not cause a duplicate defence before the reaction has
+        # had time to render.
         s.entities[:] = [e for e in s.entities if e.get('id') != 9101]
         second = play(slot=1, card=s.hand_cards[1], grid=(4, 11))
         self.executor.submit(SimpleNamespace(actions=(second,)), s)
@@ -2014,15 +2015,58 @@ class ExecutorTests(unittest.TestCase):
             set(suppressed[-1]['threat_ids'])
             & set(pending.threat_ids)
         )
-        confirmed = [
+
+    def test_swarm_recheck_allows_second_defender_when_most_threat_survives(self):
+        s = state()
+        self._reserve_spell_swarm(s)
+        reservation = self.executor.threat_reservations[-1]
+
+        # After the short reaction hold and a genuinely newer frame, two of
+        # three surviving bodies are still a substantial residual threat.
+        # The newly computed policy action must be allowed through.
+        s.entities[:] = [e for e in s.entities if e.get('id') != 9101]
+        s.received_at = reservation.reaction_started_at + 1.0
+        second = play(slot=1, card=s.hand_cards[1], grid=(4, 11))
+        with patch(
+                'agent.execution.time.perf_counter',
+                return_value=reservation.suppress_until + 0.01):
+            self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertEqual(len(self.executor.pending), 1)
+        releases = [
             data for event, data in self.events
-            if event == 'threat_reservation_started'
-            and data.get('confidence') == 'confirmed'
+            if event == 'threat_reservation_recheck_released'
         ]
+        self.assertTrue(releases)
+        self.assertEqual(releases[-1]['reason'], 'residual_still_dangerous')
         self.assertGreaterEqual(
-            confirmed[-1]['ttl_ms'],
-            round(self.executor.SPELL_THREAT_RESERVATION_CONFIRMED_SECONDS * 1000),
+            releases[-1]['residual_ratio'],
+            self.executor.THREAT_RESIDUAL_RELEASE_RATIO,
         )
+
+    def test_swarm_recheck_keeps_gate_when_mostly_cleared(self):
+        s = state()
+        self._reserve_spell_swarm(s)
+        reservation = self.executor.threat_reservations[-1]
+
+        # One low-count survivor out of the original three is treated as a
+        # mostly resolved response for the remainder of the short reservation,
+        # avoiding waste while tower/ongoing effects finish it.
+        s.entities[:] = [e for e in s.entities if e.get('id') == 9103]
+        s.received_at = reservation.reaction_started_at + 1.0
+        second = play(slot=1, card=s.hand_cards[1], grid=(3, 12))
+        with patch(
+                'agent.execution.time.perf_counter',
+                return_value=reservation.suppress_until + 0.01):
+            self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertFalse(self.executor.pending)
+        suppressed = [
+            data for event, data in self.events
+            if event == 'action_suppressed'
+            and data.get('reason') == 'threat_already_committed'
+        ]
+        self.assertTrue(suppressed)
 
     def test_swarm_reservation_does_not_absorb_different_push_unit(self):
         s = state()
