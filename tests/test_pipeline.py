@@ -451,7 +451,7 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(self.executor._post_action_settle_tick, -1)
         self.assertFalse(self.executor.decision_blocked(s))
 
-    def test_unclassified_play_keeps_global_settle_fallback(self):
+    def test_unclassified_background_hand_ack_does_not_reintroduce_global_settle(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
         self.executor.submit(SimpleNamespace(actions=(first,)), s)
@@ -463,7 +463,10 @@ class ExecutorTests(unittest.TestCase):
         s.tick += 1
         s.hand_cards[0] = 0
         self.executor.poll(s, lambda *_: True)
-        self.assertGreaterEqual(self.executor._post_action_settle_tick, s.tick)
+        self.assertEqual(self.executor._post_action_settle_tick, -1)
+        reasons = [data.get('reason') for event, data in self.events
+                   if event == 'post_action_settle_skipped']
+        self.assertIn('background_hand_ack', reasons)
 
     def test_ack_timeout_with_known_threat_uses_uncertain_local_reservation(self):
         s = state()
