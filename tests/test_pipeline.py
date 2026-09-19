@@ -331,6 +331,33 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
 
+    def test_owner_one_enemy_on_opponent_half_does_not_fake_defend(self):
+        a, s = self.adapter(owner=1)
+        s.elixir = 7.0
+        # Owner 1 defends high Y.  An enemy still at low Y is near its own
+        # baseline and must not be interpreted as pressure on us.
+        add_enemy(s, 9291, 3500, 7000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertTrue(o.action_mask.reasons['neutral_patience_active'])
+        self.assertIsNone(o.action_mask.reasons['defensive_threat_lane'])
+
+    def test_owner_one_enemy_on_our_half_enters_defend(self):
+        a, s = self.adapter(owner=1)
+        s.elixir = 7.0
+        # High Y is owner 1's side of the arena.
+        add_enemy(s, 9292, 14500, 22000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
+        self.assertEqual(o.action_mask.reasons['defensive_threat_lane'], 'right')
+
     def test_neutral_patience_holds_heavy_commitments_but_keeps_wait_and_cycle(self):
         a, s = self.adapter()
         s.elixir = 7.0
