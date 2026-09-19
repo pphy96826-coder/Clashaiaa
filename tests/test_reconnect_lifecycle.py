@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from test_pipeline import opening
+from tests.test_pipeline import opening
 from main import CustomCardDeployAgent
 from live_lifecycle import LiveLifecycle
 from agent.feature_adapter import FeatureAdapter
