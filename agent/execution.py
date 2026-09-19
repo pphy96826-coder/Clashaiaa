@@ -559,7 +559,7 @@ class ActionExecutor:
                 if skill:
                     row = raw_controller(state, action)
                     if state.tick > pending.sent_tick and row and row.get('charges') == 0:
-                        self.pending.remove(pending)
+                        self.ack_watch.remove(pending)
                         self._clear_spend(pending.command_seq)
                         self.log('ability_ack', ability=action.ability_id, source_entity=action.source_entity,
                                  tick=state.tick, latency_ms=(now-pending.sent_at)*1000,
@@ -569,7 +569,7 @@ class ActionExecutor:
                         if self.on_ability_ack:
                             self.on_ability_ack(action, state)
                     elif now - pending.sent_at > config.ACK_TIMEOUT_SECONDS:
-                        self.pending.remove(pending)
+                        self.ack_watch.remove(pending)
                         # An ambiguous ability tap must never be replayed, but
                         # it should not stop ordinary card play for the rest
                         # of the match.  Lock this carrier and let cards
@@ -587,11 +587,13 @@ class ActionExecutor:
                 # downward threshold, and the original hand check remains
                 # authoritative whenever it is available.
                 elixir_changed = False
-                if pending.prior_elixir is not None and state.elixir is not None:
+                allow_elixir_fallback = len(self.ack_watch) == 1
+                if (allow_elixir_fallback and pending.prior_elixir is not None
+                        and state.elixir is not None):
                     elixir_changed = (state.tick > pending.sent_tick and
                         float(state.elixir) <= float(pending.prior_elixir) - pending.cost + 0.15)
                 if hand_changed or elixir_changed:
-                    self.pending.remove(pending)
+                    self.ack_watch.remove(pending)
                     self._clear_spend(pending.command_seq)
                     self.log('hand_ack', card=action.card_id, slot=action.hand_slot,
                         command_seq=pending.command_seq,
@@ -616,13 +618,16 @@ class ActionExecutor:
                     self._confirmed_for_simulation.append((action, pending.sent_tick,
                                                            pending.command_seq))
                     self._fresh_state_required = True
-                    # Clear defensive intent gets a local anti-overcommit gate;
-                    # ambiguous/non-defensive plays retain the conservative
-                    # global settle + preview fallback.
-                    if not self._commit_threat_reservation(pending, state, now):
-                        self._arm_post_action_recheck(state, pending, reason='hand_ack')
+                    if self._commit_threat_reservation(
+                            pending, state, now, confidence='confirmed'):
+                        pass
+                    else:
+                        self.log('post_action_settle_skipped',
+                                 command_seq=pending.command_seq,
+                                 card=action.card_id,
+                                 reason='background_hand_ack')
                 elif now - pending.sent_at > config.ACK_TIMEOUT_SECONDS:
-                    self.pending.remove(pending)
+                    self.ack_watch.remove(pending)
                     # A missing ACK is ambiguous: the touch may have reached
                     # the game while telemetry was late.  Keep its virtual
                     # unit briefly so the next policy frame does not spend a
@@ -674,11 +679,6 @@ class ActionExecutor:
                     else:
                         self._arm_post_action_recheck(
                             state, pending, reason='ack_timeout')
-            elif now > pending.expires:
-                self.pending.remove(pending)
-                self.log('action_expired', card=action.card_id, decision_tick=pending.decision_tick,
-                         command_seq=pending.command_seq, outcome='skipped',
-                         continue_running=True)
         for pending in list(self.spawn_watch):
             action = pending.action
             player = next(p for p in state.raw['players'] if p['owner'] == action.owner)
