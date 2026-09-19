@@ -671,11 +671,20 @@ class CustomCardDeployAgent:
                         self.log('execution_halted', reason=self.executor.fault,
                                  tick=state.tick)
                         break
-                    if (self.executor.max_actions is not None and
-                        self.executor.confirmed_actions >= self.executor.max_actions):
-                        self.log('action_budget_reached', max_actions=self.executor.max_actions,
-                                 confirmed_actions=self.executor.confirmed_actions, tick=state.tick)
-                        break
+                    if self.executor.action_budget_exhausted:
+                        # Do not keep running policy after the requested number
+                        # of real action attempts. Let background ACK watches
+                        # reconcile for at most their normal timeout, then stop
+                        # with complete outcome logs.
+                        if self.executor.action_budget_settled:
+                            self.log('action_budget_reached',
+                                     max_actions=self.executor.max_actions,
+                                     attempted_actions=self.executor.attempted_actions,
+                                     confirmed_actions=self.executor.confirmed_actions,
+                                     tick=state.tick)
+                            break
+                        time.sleep(.005)
+                        continue
                     if model_warmup_pending:
                         warm_batch, _ = self.adapter.tensorize(
                             state, self.executor.blocked_slots(state),
