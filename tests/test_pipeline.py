@@ -280,6 +280,12 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(o.action_mask.reasons['strategy_phase'], 'counterpush')
         self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(o.action_mask.reasons['attack_opportunity_active'])
+        self.assertEqual(
+            o.action_mask.reasons['attack_opportunity_reason'],
+            'counterpush_support',
+        )
+        self.assertEqual(o.action_mask.reasons['attack_opportunity_lane'], 'right')
         self.assertEqual(o.action_mask.reasons['counterpush_lane'], 'right')
         self.assertEqual(o.action_mask.reasons['counterpush_support_entity_id'], 9201)
         hog = o.action_mask.placement_masks['2']
@@ -463,6 +469,14 @@ class AdapterTests(unittest.TestCase):
             expired.action_mask.reasons['attack_window_reason'],
             'recent_enemy_building_expired',
         )
+        self.assertEqual(
+            expired.action_mask.reasons['attack_opportunity_reason'],
+            'recent_enemy_building_expired',
+        )
+        self.assertEqual(
+            expired.action_mask.reasons['attack_opportunity_kind'],
+            'building_window',
+        )
         self.assertEqual(expired.action_mask.reasons['attack_window_card_id'], 27000000)
         self.assertTrue(expired.action_mask.hand_slots[2])  # Hog is released.
 
@@ -523,6 +537,71 @@ class AdapterTests(unittest.TestCase):
         self.assertIsNone(FeatureAdapter._low_elixir_attack_window(
             6.0, (3.25, 4.0), defensive_pressure=True))
 
+    def test_attack_opportunity_context_prioritizes_counterpush(self):
+        context = FeatureAdapter._attack_opportunity_context(
+            9.0,
+            counterpush={
+                'lane': 'right',
+                'support_entity_id': 9701,
+                'support_card_id': 26000014,
+            },
+            building_window={
+                'reason': 'enemy_building_out_of_cycle',
+                'card_id': 27000000,
+                'plays_since': 2,
+                'plays_until_return': 2,
+            },
+            low_elixir_window={
+                'reason': 'opponent_low_elixir',
+                'lower': 2.5,
+                'upper': 3.5,
+            },
+        )
+        self.assertEqual(context['kind'], 'counterpush')
+        self.assertEqual(context['reason'], 'counterpush_support')
+        self.assertEqual(context['lane'], 'right')
+        self.assertTrue(context['release_hog'])
+
+    def test_attack_opportunity_context_defense_overrides_offense(self):
+        context = FeatureAdapter._attack_opportunity_context(
+            10.0,
+            defensive_pressure=True,
+            counterpush={
+                'lane': 'left',
+                'support_entity_id': 9702,
+                'support_card_id': 26000038,
+            },
+            building_window={
+                'reason': 'recent_enemy_building_expired',
+                'card_id': 27000000,
+            },
+            low_elixir_window={
+                'reason': 'opponent_low_elixir',
+                'lower': 1.0,
+                'upper': 2.0,
+            },
+        )
+        self.assertIsNone(context)
+
+    def test_attack_opportunity_context_prioritizes_building_over_low_elixir(self):
+        context = FeatureAdapter._attack_opportunity_context(
+            6.0,
+            building_window={
+                'reason': 'enemy_building_out_of_cycle',
+                'card_id': 27000000,
+                'plays_since': 1,
+                'plays_until_return': 3,
+            },
+            low_elixir_window={
+                'reason': 'opponent_low_elixir',
+                'lower': 2.75,
+                'upper': 3.5,
+            },
+        )
+        self.assertEqual(context['kind'], 'building_window')
+        self.assertEqual(context['reason'], 'enemy_building_out_of_cycle')
+        self.assertEqual(context['card_id'], 27000000)
+
     def test_neutral_patience_releases_near_elixir_cap(self):
         a, s = self.adapter()
         s.elixir = 8.5
@@ -532,6 +611,15 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
         self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(o.action_mask.reasons['attack_opportunity_active'])
+        self.assertEqual(
+            o.action_mask.reasons['attack_opportunity_reason'],
+            'near_elixir_cap',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['attack_opportunity_kind'],
+            'anti_overflow',
+        )
         self.assertTrue(o.action_mask.hand_slots[1])
         self.assertTrue(o.action_mask.hand_slots[3])
 
