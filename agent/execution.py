@@ -38,6 +38,7 @@ class ThreatReservation:
     threat_ids: frozenset
     target: tuple[float, float]
     expires_at: float
+    confidence: str = 'confirmed'
 
 
 class ActionExecutor:
@@ -61,6 +62,7 @@ class ActionExecutor:
         self.attempted_actions = 0
         self.confirmed_actions = 0
         self.pending = []
+        self.ack_watch = []
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='android-input')
         self.future = None
         self.active = None
@@ -88,6 +90,7 @@ class ActionExecutor:
         # Do not carry queued actions, reservations or locks across matches.
         # An already submitted Android command cannot be unsent.
         self.pending.clear()
+        self.ack_watch.clear()
         self.spawn_watch.clear()
         self.cooldowns.clear()
         self.unconfirmed_spend.clear()
@@ -276,7 +279,12 @@ class ActionExecutor:
             threat_ids=threat_ids,
             target=pending.threat_target,
             expires_at=now + self.THREAT_RESERVATION_SECONDS,
+            confidence=confidence,
         )
+        self.threat_reservations[:] = [
+            row for row in self.threat_reservations
+            if row.command_seq != pending.command_seq
+        ]
         self.threat_reservations.append(reservation)
         self.log('threat_reservation_started',
                  command_seq=pending.command_seq,
@@ -303,7 +311,7 @@ class ActionExecutor:
         self.reset()
 
     def blocked_slots(self, state):
-        blocked = {p.action.hand_slot for p in (*self.pending, *self.spawn_watch)
+        blocked = {p.action.hand_slot for p in (*self.pending, *self.ack_watch, *self.spawn_watch)
                    if p.action.hand_slot is not None}
         now = time.perf_counter()
         for slot, (card, until) in list(self.cooldowns.items()):
@@ -316,7 +324,8 @@ class ActionExecutor:
         return blocked
 
     def blocked_abilities(self):
-        return self.ability_locks | {p.action.source_entity for p in (*self.pending, *self.spawn_watch)
+        return self.ability_locks | {p.action.source_entity
+                                    for p in (*self.pending, *self.ack_watch, *self.spawn_watch)
                                     if p.action.kind.value == 'activate_ability'}
 
     @property
@@ -730,5 +739,6 @@ class ActionExecutor:
 
     def close(self):
         self.pending.clear()
+        self.ack_watch.clear()
         self.pool.shutdown(wait=True, cancel_futures=True)
         self.actuator.close()
