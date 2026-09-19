@@ -469,11 +469,11 @@ class ActionExecutor:
         # emulator/probe telemetry is slow, so age alone is no longer enough.
         active_seqs = {
             int(p.command_seq)
-            for p in (*self.pending, *self.ack_watch, *self.spawn_watch)
+            for p in self.pending
             if getattr(p, 'state', 'queued') == 'sent'
-            or p in self.ack_watch
-            or p in self.spawn_watch
         }
+        active_seqs.update(int(p.command_seq) for p in self.ack_watch)
+        active_seqs.update(int(p.command_seq) for p in self.spawn_watch)
         active_seqs.update(
             int(guard['command_seq'])
             for guard in self.slot_consume_guards.values()
