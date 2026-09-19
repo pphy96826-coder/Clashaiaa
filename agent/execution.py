@@ -622,14 +622,39 @@ class ActionExecutor:
                         action.card_id in BINDINGS
                         and action.metadata.get('policy_effective_form_code') == 1
                     )
+                    hero_musketeer_play = (
+                        action.card_id == MUSKETEER
+                        and action.metadata.get('policy_effective_form_code') == 2
+                    )
+                    prior_entities = getattr(
+                        pending, 'prior_entities', frozenset()) or frozenset()
+                    hero_members = set()
+                    if hero_musketeer_play:
+                        player = next(
+                            (p for p in state.raw.get('players', [])
+                             if p.get('owner') == action.owner),
+                            None,
+                        )
+                        if player:
+                            hero_members = {
+                                eid for row in player.get('ability_runtime', [])
+                                if row.get('known') is True
+                                and row.get('ability_name') == ABILITY
+                                for eid in row.get('members', [])
+                            }
                     for entity in state.entities:
                         entity_id = entity.get('id')
-                        if not isinstance(entity_id, int) or entity_id in pending.prior_entities:
+                        if not isinstance(entity_id, int) or entity_id in prior_entities:
                             continue
                         if entity.get('owner') != action.owner:
                             continue
                         if evolved_play:
                             matches = is_evolved_entity(entity, action.card_id)
+                        elif hero_musketeer_play:
+                            matches = (
+                                entity.get('card_id') == 203000014
+                                and entity_id in hero_members
+                            )
                         else:
                             matches = entity.get('card_id') == action.card_id
                         if matches:
