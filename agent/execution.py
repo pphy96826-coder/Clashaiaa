@@ -837,13 +837,19 @@ class ActionExecutor:
                 # downward threshold, and the original hand check remains
                 # authoritative whenever it is available.
                 elixir_changed = False
-                # If an earlier accepted action still lacks authoritative hand
-                # rotation, a new aggregate elixir drop is not uniquely
-                # attributable. Keep the newer action on ACK watch until a
-                # hand/spawn signal arrives instead of stealing the old drop.
+                # If any earlier action still lacks authoritative hand
+                # reconciliation, a new aggregate elixir drop is not uniquely
+                # attributable. This includes weak positive ACK guards and
+                # timed-out/unresolved spend reservations. Keep the newer
+                # action on ACK watch until a hand/spawn signal arrives.
+                other_unconfirmed_spend = any(
+                    int(command_seq) != int(pending.command_seq)
+                    for _, _, command_seq in self.unconfirmed_spend
+                )
                 allow_elixir_fallback = (
                     len(self.ack_watch) == 1
                     and not self.slot_consume_guards
+                    and not other_unconfirmed_spend
                 )
                 if (allow_elixir_fallback and pending.prior_elixir is not None
                         and state.elixir is not None):
