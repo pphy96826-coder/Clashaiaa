@@ -394,7 +394,29 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(started[-1]['confidence'], 'uncertain')
         self.assertIn('action_missed', [event for event, _ in self.events])
 
-    def test_ack_timeout_without_known_threat_keeps_global_settle_fallback(self):
+    def test_ack_timeout_without_known_threat_uses_uncertain_prediction_gate(self):
+        s = state()
+        first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending[0]
+        pending.state = 'sent'
+        pending.sent_at = time.perf_counter() - config.ACK_TIMEOUT_SECONDS - 0.1
+        pending.sent_tick = s.tick
+        pending.prior_elixir = s.elixir
+        self.executor.predictions.append({
+            'action': first,
+            'command_seq': pending.command_seq,
+            'expires_at': time.perf_counter() + 2.0,
+        })
+        s.tick += 1
+        self.executor.poll(s, lambda *_: True)
+        self.assertFalse(self.executor.threat_reservations)
+        self.assertEqual(self.executor._post_action_settle_tick, -1)
+        skipped = [data.get('reason') for event, data in self.events
+                   if event == 'post_action_settle_skipped']
+        self.assertIn('uncertain_prediction_ack_timeout', skipped)
+
+    def test_ack_timeout_without_prediction_keeps_global_settle_fallback(self):
         s = state()
         first = play(slot=0, card=s.hand_cards[0], grid=(3, 10))
         self.executor.submit(SimpleNamespace(actions=(first,)), s)
@@ -404,7 +426,8 @@ class ExecutorTests(unittest.TestCase):
         pending.sent_tick = s.tick
         pending.prior_elixir = s.elixir
         s.tick += 1
-        self.executor.poll(s, lambda *_: True)
+        with patch.object(config, 'ENABLE_MODEL_PREDICTION_OVERLAY', False):
+            self.executor.poll(s, lambda *_: True)
         self.assertFalse(self.executor.threat_reservations)
         self.assertGreaterEqual(self.executor._post_action_settle_tick, s.tick)
         reasons = [data.get('reason') for event, data in self.events
