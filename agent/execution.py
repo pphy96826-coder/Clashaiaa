@@ -617,6 +617,7 @@ class ActionExecutor:
                 card_family = int(action.card_id or 0) // 1_000_000
                 spawn_ack = False
                 spawn_entity_id = None
+                spawn_ack_evidence = None
                 if card_family in (26, 27):
                     evolved_play = (
                         action.card_id in BINDINGS
@@ -642,12 +643,15 @@ class ActionExecutor:
                                 and row.get('ability_name') == ABILITY
                                 for eid in row.get('members', [])
                             }
+
+                    new_own_entities = []
                     for entity in state.entities:
                         entity_id = entity.get('id')
                         if not isinstance(entity_id, int) or entity_id in prior_entities:
                             continue
                         if entity.get('owner') != action.owner:
                             continue
+                        new_own_entities.append(entity)
                         if evolved_play:
                             matches = is_evolved_entity(entity, action.card_id)
                         elif hero_musketeer_play:
@@ -660,7 +664,33 @@ class ActionExecutor:
                         if matches:
                             spawn_ack = True
                             spawn_entity_id = entity_id
+                            spawn_ack_evidence = 'new_source_entity'
                             break
+
+                    # Native entity card IDs can represent the spawned unit
+                    # rather than the deck/source card (multi-body troops and
+                    # transformed forms are common examples).  When exactly
+                    # one card is awaiting ACK, a brand-new own entity that
+                    # appears very close to the submitted deploy point is
+                    # still strong positive evidence that this touch landed.
+                    # Never use this fallback for spells or with competing ACK
+                    # watches, because either case makes attribution ambiguous.
+                    if (not spawn_ack and len(self.ack_watch) == 1
+                            and action.target_grid is not None):
+                        target_x, target_y = action_world(action)
+                        nearby = []
+                        for entity in new_own_entities:
+                            ex, ey = entity.get('x'), entity.get('y')
+                            if not isinstance(ex, (int, float)) or not isinstance(ey, (int, float)):
+                                continue
+                            distance2 = (float(ex) - target_x) ** 2 + (float(ey) - target_y) ** 2
+                            if distance2 <= 2200.0 ** 2:
+                                nearby.append((distance2, entity))
+                        if nearby:
+                            _, nearest = min(nearby, key=lambda row: row[0])
+                            spawn_ack = True
+                            spawn_entity_id = nearest.get('id')
+                            spawn_ack_evidence = 'new_own_entity_near_target'
                 # Some probe revisions publish elixir before hand rotation.
                 # Treat a sufficiently large, near-immediate cost drop as a
                 # fallback ACK.  Natural regeneration cannot satisfy this
@@ -684,7 +714,7 @@ class ActionExecutor:
                         outcome='accepted',
                         evidence=('hand_rotation' if hand_changed else
                                   'elixir_cost_drop' if elixir_changed else
-                                  'new_source_entity'),
+                                  spawn_ack_evidence or 'new_source_entity'),
                         spawn_entity_id=spawn_entity_id)
                     if action.card_id in BINDINGS and action.metadata.get('policy_effective_form_code') == 1:
                         player = next(p for p in state.raw['players'] if p['owner'] == action.owner)
