@@ -130,8 +130,8 @@ STALE_SECONDS = 1.2
 # Card ACKs use a separate bounded adaptive budget below: while waiting, only
 # that exact native slot is locked, so unrelated cards can still be played.
 ACK_TIMEOUT_SECONDS = 0.35
-CARD_ACK_TIMEOUT_BASE_SECONDS = 1.0
-CARD_ACK_TIMEOUT_MAX_SECONDS = 1.2
+CARD_ACK_TIMEOUT_BASE_SECONDS = 1.1
+CARD_ACK_TIMEOUT_MAX_SECONDS = 1.4
 CARD_ACK_TIMEOUT_MARGIN_SECONDS = 0.18
 CARD_ACK_TIMEOUT_INPUT_MULTIPLIER = 2.0
 # Keep an ambiguous touch visible to the model briefly after timeout.  The
