@@ -892,7 +892,12 @@ class CustomCardDeployAgent:
                         batch, obs = self.adapter.tensorize(state, self.executor.blocked_slots(state), self.executor.reserved_elixir,
                             self.executor.blocked_abilities(), self.executor.model_predictions(state),
                             simulation_entities=simulation_entities)
-                        decoded, inference_ms = self._engine().decide(batch, obs, self.adapter)
+                        decoded, inference_ms = self._engine().decide(
+                            batch,
+                            obs,
+                            self.adapter,
+                            emergency=prelock_fast_path,
+                        )
                         adjusted = []
                         for action in decoded.actions:
                             # A valid mirror already contains the target at
@@ -928,6 +933,8 @@ class CustomCardDeployAgent:
                                 frame_to_policy_start_ms=max(
                                     0.0, (pipeline_start-state.received_at)*1000),
                                 tick_gap=None if last_decision_tick < 0 else state.tick-last_decision_tick,
+                                prelock_fast_path=bool(prelock_fast_path),
+                                emergency_policy_turn=bool(prelock_fast_path),
                                 simulation_used=simulation_entities is not None,
                                 simulation_entity_count=(len(simulation_entities)
                                                           if simulation_entities is not None else 0),
