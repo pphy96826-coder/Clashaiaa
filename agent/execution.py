@@ -175,17 +175,19 @@ class ActionExecutor:
             * max(0.0, float(self.end_to_end_latency_ms)) / 1000.0
         )
         timeout = max(timeout, input_based)
-        # The first few accepted card ACKs are the only live phase where the
-        # guest hand/probe path repeatedly exceeded the normal floor. Borrow
-        # the already-bounded max window until enough real ACK samples exist;
-        # after that, fall back to the normal adaptive p80 + margin logic.
+        # The first few authoritative card ACKs are the only live phase where
+        # the guest hand/probe path repeatedly exceeded the normal floor.
+        # Borrow the already-bounded max window until enough strong hand/cycle
+        # samples exist; after that, use the recent strong-ACK p90 + margin.
         if len(self._ack_latency_samples_ms) < int(config.CARD_ACK_BOOTSTRAP_SAMPLES):
             return float(config.CARD_ACK_TIMEOUT_MAX_SECONDS)
         if self._ack_latency_samples_ms:
             ordered = sorted(self._ack_latency_samples_ms[-12:])
-            # A small recent p80 is robust to one-off spikes while still
-            # following sustained slow probe/guest hand rotation.
-            index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.8) - 1))
+            # Use the recent strong-ACK p90.  Weak elixir/entity fallbacks are
+            # intentionally excluded from this sample set because they can be
+            # hundreds of milliseconds faster than authoritative hand/cycle
+            # consumption telemetry and would otherwise pull the timeout down.
+            index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * 0.9) - 1))
             observed = (
                 ordered[index] / 1000.0
                 + float(config.CARD_ACK_TIMEOUT_MARGIN_SECONDS)
@@ -196,7 +198,12 @@ class ActionExecutor:
             min(float(config.CARD_ACK_TIMEOUT_MAX_SECONDS), timeout),
         )
 
-    def _record_card_ack_latency(self, latency_ms):
+    def _record_card_ack_latency(self, latency_ms, evidence=None):
+        # Only authoritative consumption evidence should tune the slow-path
+        # timeout.  Elixir-drop / entity-spawn ACKs remain valid immediate ACKs
+        # but are often much faster than native hand telemetry.
+        if evidence not in ('hand_rotation', 'native_cycle_transition'):
+            return
         if not isinstance(latency_ms, (int, float)) or not math.isfinite(latency_ms):
             return
         if latency_ms < 0:
@@ -1159,7 +1166,8 @@ class ActionExecutor:
                         if elixir_changed:
                             self._clear_spend(pending.command_seq)
                     ack_latency_ms = (now - ack_started_at) * 1000
-                    self._record_card_ack_latency(ack_latency_ms)
+                    self._record_card_ack_latency(
+                        ack_latency_ms, evidence=ack_evidence)
                     self.log('hand_ack', card=action.card_id, slot=action.hand_slot,
                         command_seq=pending.command_seq,
                         tick=state.tick, latency_ms=ack_latency_ms,
