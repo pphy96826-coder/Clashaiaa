@@ -595,7 +595,8 @@ class ActionExecutor:
                     # second card on an apparently untouched threat.  This
                     # does not disable the card or block other slots; a later
                     # authoritative entity/hand update removes it normally.
-                    self._retain_uncertain_prediction(pending.command_seq, now)
+                    prediction_retained = self._retain_uncertain_prediction(
+                        pending.command_seq, now)
                     self.cooldowns[action.hand_slot] = (action.card_id, now + 1)
                     # A completed ADB input with no observed hand transition
                     # means this attempt is ambiguous/missed, but it is not
@@ -621,9 +622,24 @@ class ActionExecutor:
                     # concrete defensive threat assignment, keep only that
                     # threat locally reserved instead of freezing every policy
                     # decision behind the global settle/preview gate.
-                    if not self._commit_threat_reservation(
+                    if self._commit_threat_reservation(
                             pending, state, now, confidence='uncertain'):
-                        self._arm_post_action_recheck(state, pending, reason='ack_timeout')
+                        pass
+                    elif config.ENABLE_MODEL_PREDICTION_OVERLAY and prediction_retained:
+                        # The transport completed and the model still sees a
+                        # short-lived virtual version of the submitted card.
+                        # That prediction, together with reserved elixir and
+                        # the exact-action miss cooldown, is enough to avoid a
+                        # second stale answer without freezing unrelated play.
+                        self.log('post_action_settle_skipped',
+                                 command_seq=pending.command_seq,
+                                 card=action.card_id,
+                                 reason='uncertain_prediction_ack_timeout',
+                                 protection_ms=round(
+                                     config.UNCERTAIN_PREDICTION_SECONDS * 1000))
+                    else:
+                        self._arm_post_action_recheck(
+                            state, pending, reason='ack_timeout')
             elif now > pending.expires:
                 self.pending.remove(pending)
                 self.log('action_expired', card=action.card_id, decision_tick=pending.decision_tick,
