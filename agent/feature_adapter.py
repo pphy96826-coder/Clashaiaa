@@ -211,7 +211,15 @@ class FeatureAdapter:
             # A positive card leaving its native slot is execution evidence.
             # Empty/refilling slots stay empty in the policy observation.
             for slot, old in previous.items():
-                if old > 0 and old != hand.get(slot, 0) and old in self.bundle.card_specs:
+                changed = old > 0 and old != hand.get(slot, 0)
+                if changed and owner != self.actor_owner:
+                    # Every positive opponent hand transition counts as one
+                    # public card play for the four-card return rule, even when
+                    # the exact effect/cost is unsupported or Mirror-specific.
+                    self._opponent_exact_play_count += 1
+                    if old in self.bundle.card_specs and old != 28000006:
+                        self._opponent_last_play_count[int(old)] = self._opponent_exact_play_count
+                if changed and old in self.bundle.card_specs:
                     self._revealed[owner].add(old)
                     if old == 28000006:
                         # A hand transition cannot identify Mirror's copied
@@ -224,13 +232,6 @@ class FeatureAdapter:
                     self._events.append(EventV1(tick=state.tick, event_type='action_executed', owner=owner,
                         card_id=old, data={'kind': 'play_card', 'hand_slot': slot,
                         'evidence': 'native_hand_transition', 'cost': self.bundle.card_specs[old].elixir_cost}))
-                    if owner != self.actor_owner:
-                        # Exact public play order: count only cards whose play is
-                        # proven by the native hand transition. This is enough
-                        # to reason about the four-card return rule without
-                        # peeking at the opponent's current hidden hand.
-                        self._opponent_exact_play_count += 1
-                        self._opponent_last_play_count[int(old)] = self._opponent_exact_play_count
             self._previous_hands[owner] = hand
         # Track only public opponent building lifecycle. A building becoming
         # visible is public board state; its disappearance starts a short,
