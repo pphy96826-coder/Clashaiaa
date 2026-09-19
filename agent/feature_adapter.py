@@ -65,6 +65,8 @@ INCOMING_PUSH_RECENT_HEAVY_TICKS = 30
 INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH = 14000.0
 HEAVY_DEFEND_CANNON_RELEASE_DEPTH = 11500.0
 HEAVY_DEFEND_BODY_RELEASE_DEPTH = 14500.0
+HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH = 15500.0
+HEAVY_DEFEND_EMERGENCY_DEPTH = 4500.0
 HEAVY_DEFEND_CANNON_MIN_DEPTH = 4500.0
 HEAVY_DEFEND_CANNON_MAX_DEPTH = 11500.0
 HEAVY_DEFEND_MUSKETEER_MAX_DEPTH = 9500.0
@@ -76,6 +78,7 @@ HEAVY_DEFEND_FIREBALL_CLUSTER_RADIUS = 5000.0
 HEAVY_DEFEND_FIREBALL_SUPPORT_MIN_COST = 3.0
 HEAVY_DEFEND_FIREBALL_TARGET_RADIUS = 5500.0
 INCOMING_PUSH_CORE_DEFENDERS = frozenset((MUSKETEER, CANNON))
+HEAVY_DEFEND_SERIAL_CARDS = frozenset((CANNON, MUSKETEER, ICE_GOLEM))
 HEAVY_DEFEND_CHEAP_CONTROL = frozenset((SKELETONS, ICE_SPIRIT))
 INCOMING_PUSH_HARD_RESERVE_CARDS = frozenset((FIREBALL,))
 
@@ -1160,6 +1163,47 @@ class FeatureAdapter:
             )
         return masked
 
+    @staticmethod
+    def _heavy_defense_priority(slots, core_depth):
+        """Choose at most one key body/anchor commitment for this decision.
+
+        Heavy defense should build a shape, not dump Cannon, Musketeer and Ice
+        Golem on consecutive stale frames.  The preferred order changes with
+        approach depth: set the backline first, then anchor the tank, then add
+        the body.  At emergency depth all key cards are released because a
+        strict sequence is less important than immediate survival.
+        """
+        if core_depth is None:
+            return {'card_id': None, 'stage': None, 'emergency': False}
+        depth = float(core_depth)
+        if depth <= HEAVY_DEFEND_EMERGENCY_DEPTH:
+            return {
+                'card_id': None,
+                'stage': 'emergency_release',
+                'emergency': True,
+            }
+        cards = set(int(cid) for cid in slots.values())
+        if depth > HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH:
+            return {
+                'card_id': None,
+                'stage': 'wait_for_approach',
+                'emergency': False,
+            }
+        if depth > HEAVY_DEFEND_BODY_RELEASE_DEPTH:
+            order = (MUSKETEER,)
+            stage = 'backline_setup'
+        elif depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH:
+            order = (MUSKETEER, ICE_GOLEM)
+            stage = 'backline_then_body'
+        else:
+            order = (CANNON, MUSKETEER, ICE_GOLEM)
+            stage = 'anchor_then_backline'
+        return {
+            'card_id': next((cid for cid in order if cid in cards), None),
+            'stage': stage,
+            'emergency': False,
+        }
+
     def _heavy_defense_fireball_context(self, incoming_push):
         """Return visible support value near a tracked heavy core.
 
@@ -1630,6 +1674,12 @@ class FeatureAdapter:
             self._heavy_defense_fireball_context(incoming_push)
             if defending_incoming_push else None
         )
+        heavy_priority = (
+            self._heavy_defense_priority(slots, heavy_core_depth)
+            if defending_incoming_push
+            else {'card_id': None, 'stage': None, 'emergency': False}
+        )
+        heavy_priority_card = heavy_priority.get('card_id')
         neutral_patience = (
             strategy_phase == 'neutral'
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
@@ -1708,6 +1758,15 @@ class FeatureAdapter:
             and heavy_core_depth is not None
             and heavy_core_depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH
         )
+        self.quality['heavy_defend_musketeer_held'] = bool(
+            defending_incoming_push
+            and heavy_core_depth is not None
+            and heavy_core_depth > HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH
+        )
+        self.quality['heavy_defend_priority_card_id'] = heavy_priority_card
+        self.quality['heavy_defend_priority_stage'] = heavy_priority.get('stage')
+        self.quality['heavy_defend_emergency_release'] = bool(
+            heavy_priority.get('emergency'))
         self.quality['heavy_defend_ice_golem_held'] = bool(
             defending_incoming_push
             and heavy_core_depth is not None
@@ -1786,6 +1845,14 @@ class FeatureAdapter:
                 )
                 continue
             if (defending_incoming_push
+                    and cid == MUSKETEER
+                    and heavy_core_depth is not None
+                    and heavy_core_depth > HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_musketeer_for_heavy_core'
+                )
+                continue
+            if (defending_incoming_push
                     and cid == ICE_GOLEM
                     and heavy_core_depth is not None
                     and heavy_core_depth > HEAVY_DEFEND_BODY_RELEASE_DEPTH):
@@ -1798,6 +1865,15 @@ class FeatureAdapter:
                     and not (heavy_fireball and heavy_fireball.get('release'))):
                 slot_reasons[str(slot)] = (
                     'strategy_hold_fireball_for_heavy_support'
+                )
+                continue
+            if (defending_incoming_push
+                    and not heavy_priority.get('emergency')
+                    and heavy_priority_card is not None
+                    and cid in HEAVY_DEFEND_SERIAL_CARDS
+                    and cid != heavy_priority_card):
+                slot_reasons[str(slot)] = (
+                    'strategy_wait_heavy_defense_priority'
                 )
                 continue
             if (preparing_for_push
@@ -1943,6 +2019,14 @@ class FeatureAdapter:
                          defending_incoming_push
                          and heavy_core_depth is not None
                          and heavy_core_depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH),
+                     'heavy_defend_musketeer_held': bool(
+                         defending_incoming_push
+                         and heavy_core_depth is not None
+                         and heavy_core_depth > HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH),
+                     'heavy_defend_priority_card_id': heavy_priority_card,
+                     'heavy_defend_priority_stage': heavy_priority.get('stage'),
+                     'heavy_defend_emergency_release': bool(
+                         heavy_priority.get('emergency')),
                      'heavy_defend_ice_golem_held': bool(
                          defending_incoming_push
                          and heavy_core_depth is not None
