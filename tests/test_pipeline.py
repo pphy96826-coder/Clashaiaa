@@ -2139,6 +2139,115 @@ class ExecutorTests(unittest.TestCase):
             & set(pending.threat_ids)
         )
 
+    def test_provisional_swarm_never_releases_before_ack_outcome(self):
+        s = state()
+        s.hand_cards[0] = 28000011
+        for entity_id, x, y in (
+            (9201, 3000, 11500),
+            (9202, 4000, 11500),
+            (9203, 3500, 12500),
+        ):
+            add_enemy(s, entity_id, x, y, card_id=26000003, hp=200)
+
+        first = play(slot=0, card=28000011, grid=(3, 11))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        base = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = base
+        pending.input_completed_at = base
+        pending.ack_timeout_seconds = 1.4
+        self.executor.ack_watch.append(pending)
+
+        with patch('agent.execution.time.perf_counter', return_value=base):
+            self.assertTrue(self.executor._commit_threat_reservation(
+                pending, s, base, confidence='provisional'))
+        reservation = self.executor.threat_reservations[-1]
+
+        # Even well past the old reaction/TTL boundary, unresolved ACK means
+        # the first answer has not yet had a terminal outcome. Do not infer
+        # failure from unchanged residual HP and spend again.
+        s.entities[:] = [e for e in s.entities if e.get('id') != 9201]
+        s.received_at = base + 2.0
+        second = play(slot=1, card=s.hand_cards[1], grid=(4, 11))
+        with patch(
+                'agent.execution.time.perf_counter',
+                return_value=reservation.expires_at + 0.25):
+            self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertFalse(self.executor.pending)
+        suppressed = [
+            data for event, data in self.events
+            if event == 'action_suppressed'
+            and data.get('reason') == 'threat_already_committed'
+        ]
+        self.assertTrue(suppressed)
+        self.assertFalse([
+            data for event, data in self.events
+            if event == 'threat_reservation_recheck_released'
+        ])
+
+    def test_confirmed_swarm_waits_for_post_ack_effect_grace(self):
+        s = state()
+        s.hand_cards[0] = 28000011
+        for entity_id, x, y in (
+            (9301, 3000, 11500),
+            (9302, 4000, 11500),
+            (9303, 3500, 12500),
+        ):
+            add_enemy(s, entity_id, x, y, card_id=26000003, hp=200)
+
+        first = play(slot=0, card=28000011, grid=(3, 11))
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        base = time.perf_counter()
+        pending.state = 'sent'
+        pending.sent_at = base
+        pending.input_completed_at = base
+        pending.ack_timeout_seconds = 1.4
+        self.executor.ack_watch.append(pending)
+        with patch('agent.execution.time.perf_counter', return_value=base):
+            self.executor._commit_threat_reservation(
+                pending, s, base, confidence='provisional')
+
+        ack_at = base + 1.1
+        self.executor.ack_watch.remove(pending)
+        with patch('agent.execution.time.perf_counter', return_value=ack_at):
+            self.executor._commit_threat_reservation(
+                pending, s, ack_at, confidence='confirmed')
+        reservation = self.executor.threat_reservations[-1]
+        self.assertAlmostEqual(
+            reservation.suppress_until - ack_at,
+            self.executor.THREAT_POST_ACK_SPELL_GRACE_SECONDS,
+            places=6,
+        )
+
+        # A newer frame exists, but the spell's battlefield effect still gets
+        # its post-ACK render/impact window before residual HP can reopen play.
+        s.entities[:] = [e for e in s.entities if e.get('id') != 9301]
+        s.received_at = ack_at + 0.05
+        second = play(slot=1, card=s.hand_cards[1], grid=(4, 11))
+        with patch(
+                'agent.execution.time.perf_counter',
+                return_value=reservation.suppress_until - 0.01):
+            self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertFalse(self.executor.pending)
+
+        # Once the post-ACK grace has elapsed, substantial residual threat is
+        # allowed to receive a fresh policy-selected defender.
+        s.received_at = reservation.suppress_until + 0.01
+        with patch(
+                'agent.execution.time.perf_counter',
+                return_value=reservation.suppress_until + 0.01):
+            self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertEqual(len(self.executor.pending), 1)
+        releases = [
+            data for event, data in self.events
+            if event == 'threat_reservation_recheck_released'
+        ]
+        self.assertTrue(releases)
+        self.assertEqual(releases[-1]['reason'], 'residual_still_dangerous')
+
     def test_swarm_recheck_allows_second_defender_when_most_threat_survives(self):
         s = state()
         self._reserve_spell_swarm(s)
