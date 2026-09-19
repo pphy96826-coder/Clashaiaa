@@ -40,6 +40,7 @@ from bridge.reference_events import ReferenceEvents
 
 HOG_26_DECK = (26000010, 26000014, 26000021, 26000030, 26000038, 27000000, 28000000, 28000011)
 MINER = 26000032
+DEFENSIVE_LANE_CARDS = frozenset((26000010, 26000014, 26000030, 26000038, 27000000))
 
 # Conservative impact envelopes in native world units.  They are deliberately
 # wider than the visual effect so a delayed spell cannot wake an inactive king
@@ -532,18 +533,8 @@ class FeatureAdapter:
                 return True
         return False
 
-    def defensive_lane_conflict(self, action, state):
-        """Detect an obvious cross-lane defensive placement mistake.
-
-        This is intentionally conservative: it only fires for core defensive
-        cards when one lane has a nearby enemy and the selected lane has none.
-        It is not a strategy override for attacks or split-lane situations.
-        """
-        defensive = {26000010, 26000014, 26000030, 26000038, 27000000}
-        if int(action.card_id or 0) not in defensive or action.target_grid is None:
-            return None
-        target_x, _ = action_world(action)
-        target_lane = 'left' if target_x < 9000.0 else 'right'
+    def _single_defensive_threat_lane(self):
+        """Return one unambiguous nearby enemy lane, otherwise None."""
         enemy = []
         for ent in self._live_entities.values():
             if int(ent.get('owner', -1)) == self.actor_owner or int(ent.get('card_id', -1)) <= 0:
@@ -552,8 +543,8 @@ class FeatureAdapter:
             if hp is not None and float(hp) <= 0:
                 continue
             x, y = float(ent['x']), float(ent['y'])
-            # Only units in the central combat/defensive half count as an
-            # immediate threat; back-line units should not force a lane flip.
+            # Match the execution validator exactly: only nearby central/
+            # defensive-half enemies can constrain a defensive placement.
             if min(y, 32000.0 - y) > 14500.0:
                 continue
             lane = 'left' if x < 9000.0 else 'right'
@@ -561,11 +552,43 @@ class FeatureAdapter:
         if not enemy:
             return None
         threat_lanes = {lane for lane, _, _ in enemy}
-        if target_lane in threat_lanes or len(threat_lanes) != 1:
+        if len(threat_lanes) != 1:
             return None
-        threat_lane = next(iter(threat_lanes))
-        return {'target_lane': target_lane, 'threat_lane': threat_lane,
+        return {'threat_lane': next(iter(threat_lanes)),
                 'enemy_count': len(enemy)}
+
+    @staticmethod
+    def _mask_to_defensive_lane(entry, threat_lane):
+        """Remove cells the live validator would reject for wrong-lane defense."""
+        left = threat_lane == 'left'
+        rows = tuple(tuple(
+            bool(allowed) and ((x < 9) if left else (x >= 9))
+            for x, allowed in enumerate(row)
+        ) for row in entry['row_major'])
+        masked = dict(entry)
+        masked['row_major'] = rows
+        masked['defensive_threat_lane'] = threat_lane
+        return masked
+
+    def defensive_lane_conflict(self, action, state):
+        """Detect an obvious cross-lane defensive placement mistake.
+
+        This is intentionally conservative: it only fires for core defensive
+        cards when one lane has a nearby enemy and the selected lane has none.
+        It is not a strategy override for attacks or split-lane situations.
+        """
+        if int(action.card_id or 0) not in DEFENSIVE_LANE_CARDS or action.target_grid is None:
+            return None
+        gate = self._single_defensive_threat_lane()
+        if gate is None:
+            return None
+        target_x, _ = action_world(action)
+        target_lane = 'left' if target_x < 9000.0 else 'right'
+        if target_lane == gate['threat_lane']:
+            return None
+        return {'target_lane': target_lane,
+                'threat_lane': gate['threat_lane'],
+                'enemy_count': gate['enemy_count']}
 
     def lead_log_action(self, action, state, latency_ms):
         """Lead a rolling Log toward a measured moving enemy.
@@ -865,6 +888,9 @@ class FeatureAdapter:
         ability_hud = self.hero_musketeer or any(r.get('ability_name') == ABILITY
             for r in player.get('ability_runtime', []))
         self.quality['ability_hud_excluded'] = ability_hud
+        defensive_lane_gate = self._single_defensive_threat_lane()
+        self.quality['defensive_threat_lane'] = (
+            defensive_lane_gate['threat_lane'] if defensive_lane_gate else None)
         for slot, cid in slots.items():
             spec = self.bundle.card_specs[cid]
             if selections is not None:
@@ -896,6 +922,9 @@ class FeatureAdapter:
             entry = self.build_placement_mask(cid, lanes, towers, entities,
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
                 ability_hud=ability_hud)
+            if defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
+                entry = self._mask_to_defensive_lane(
+                    entry, defensive_lane_gate['threat_lane'])
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
@@ -914,7 +943,10 @@ class FeatureAdapter:
             ability_sources=tuple(sorted(source_ids)),
             hand_slots=tuple(playable), placement_masks=masks,
             reasons={'effective_elixir': elixir, 'reserved_elixir': reserved_elixir,
-                     'slot_reasons': slot_reasons})
+                     'slot_reasons': slot_reasons,
+                     'defensive_threat_lane': (
+                         defensive_lane_gate['threat_lane']
+                         if defensive_lane_gate else None)})
         crowns = {}
         for owner in (0, 1):
             enemy = [t for t in towers if t.owner != owner]
