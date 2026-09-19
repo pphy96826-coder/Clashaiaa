@@ -61,6 +61,10 @@ INCOMING_PUSH_PUNISH_MIN_ELIXIR = 7.0
 INCOMING_PUSH_PLAY_BIND_TICKS = 16
 INCOMING_PUSH_RECENT_HEAVY_TICKS = 30
 INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH = 14000.0
+HEAVY_DEFEND_CANNON_RELEASE_DEPTH = 11500.0
+HEAVY_DEFEND_CANNON_MIN_DEPTH = 4500.0
+HEAVY_DEFEND_CANNON_MAX_DEPTH = 11500.0
+HEAVY_DEFEND_MUSKETEER_MAX_DEPTH = 9500.0
 INCOMING_PUSH_CORE_DEFENDERS = frozenset((MUSKETEER, CANNON))
 INCOMING_PUSH_HARD_RESERVE_CARDS = frozenset((FIREBALL,))
 
@@ -1079,31 +1083,61 @@ class FeatureAdapter:
         """Remove cells the live validator would reject for wrong-lane defense."""
         return cls._mask_to_lane(entry, threat_lane, 'defensive_threat_lane')
 
-    def _mask_to_incoming_defense(self, entry, lane):
-        """Keep preparation plays on the threatened lane and our safe half.
-
-        During build-up we still allow cheap cycle and, once the core gets
-        closer, early defender placement.  What we do not allow is spending
-        those defensive cards as an unrelated opposite-lane commitment or
-        parking them so high that they cannot participate in the incoming
-        fight.
-        """
-        masked = self._mask_to_lane(entry, lane, 'incoming_push_lane')
+    def _mask_to_defensive_depth_band(self, entry, *, min_depth=0.0,
+                                      max_depth=INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH,
+                                      metadata_prefix='defense'):
+        """Limit a placement mask to an actor-relative defensive depth band."""
+        masked = dict(entry)
         subcell = masked.get('model_subcell_offset') or (0.0, 0.0)
         dy = float(subcell[1] or 0.0)
         sign = 1.0 if self.actor_owner == 0 else -1.0
         rows = []
         for y, row in enumerate(masked['row_major']):
             world_y = (float(y) + 0.5 + sign * dy) * 1000.0
-            safe_depth = (
-                self._defensive_depth(world_y)
-                <= INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH
-            )
-            rows.append(tuple(bool(allowed) and safe_depth for allowed in row))
+            depth = self._defensive_depth(world_y)
+            in_band = float(min_depth) <= depth <= float(max_depth)
+            rows.append(tuple(bool(allowed) and in_band for allowed in row))
         masked['row_major'] = tuple(rows)
+        masked[f'{metadata_prefix}_min_defensive_depth'] = float(min_depth)
+        masked[f'{metadata_prefix}_max_defensive_depth'] = float(max_depth)
+        return masked
+
+    def _mask_to_incoming_defense(self, entry, lane):
+        """Keep preparation plays on the threatened lane and our safe half."""
+        masked = self._mask_to_lane(entry, lane, 'incoming_push_lane')
+        masked = self._mask_to_defensive_depth_band(
+            masked,
+            max_depth=INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH,
+            metadata_prefix='incoming_push',
+        )
+        # Backward-compatible diagnostic used by the existing focused tests.
         masked['incoming_push_max_defensive_depth'] = (
             INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH
         )
+        return masked
+
+    def _mask_to_heavy_defense_role(self, entry, card_id, lane):
+        """Stage core defenders for a tracked heavy push.
+
+        The heavy core lane wins over a transient opposite-lane distractor for
+        Musketeer/Cannon.  Musketeer stays behind the fight; Cannon stays in a
+        compact pull/anchor band instead of being dropped at the bridge or
+        buried on the baseline.
+        """
+        masked = self._mask_to_lane(entry, lane, 'heavy_defense_lane')
+        if int(card_id) == MUSKETEER:
+            return self._mask_to_defensive_depth_band(
+                masked,
+                max_depth=HEAVY_DEFEND_MUSKETEER_MAX_DEPTH,
+                metadata_prefix='heavy_defense_musketeer',
+            )
+        if int(card_id) == CANNON:
+            return self._mask_to_defensive_depth_band(
+                masked,
+                min_depth=HEAVY_DEFEND_CANNON_MIN_DEPTH,
+                max_depth=HEAVY_DEFEND_CANNON_MAX_DEPTH,
+                metadata_prefix='heavy_defense_cannon',
+            )
         return masked
 
     def defensive_lane_conflict(self, action, state):
@@ -1479,6 +1513,17 @@ class FeatureAdapter:
             ) else
             'neutral'
         )
+        defending_incoming_push = (
+            strategy_phase == 'defend'
+            and incoming_push is not None
+            and incoming_push.get('lane') is not None
+        )
+        heavy_core_depth = (
+            float(incoming_push.get('core_depth'))
+            if incoming_push is not None
+            and incoming_push.get('core_depth') is not None
+            else None
+        )
         neutral_patience = (
             strategy_phase == 'neutral'
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
@@ -1547,6 +1592,16 @@ class FeatureAdapter:
         self.quality['incoming_push_reserve_defenders'] = bool(
             incoming_push and incoming_push.get('reserve_core_defenders'))
         self.quality['incoming_push_preparing'] = preparing_for_push
+        self.quality['incoming_push_defending'] = defending_incoming_push
+        self.quality['heavy_defend_cannon_release_depth'] = (
+            HEAVY_DEFEND_CANNON_RELEASE_DEPTH
+            if defending_incoming_push else None
+        )
+        self.quality['heavy_defend_cannon_held'] = bool(
+            defending_incoming_push
+            and heavy_core_depth is not None
+            and heavy_core_depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH
+        )
         self.quality['incoming_push_hard_reserve_cards'] = (
             sorted(INCOMING_PUSH_HARD_RESERVE_CARDS)
             if preparing_for_push else []
@@ -1605,6 +1660,14 @@ class FeatureAdapter:
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
+            if (defending_incoming_push
+                    and cid == CANNON
+                    and heavy_core_depth is not None
+                    and heavy_core_depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_cannon_for_heavy_core'
+                )
+                continue
             if (preparing_for_push
                     and cid in INCOMING_PUSH_HARD_RESERVE_CARDS):
                 slot_reasons[str(slot)] = (
@@ -1628,7 +1691,11 @@ class FeatureAdapter:
             entry = self.build_placement_mask(cid, lanes, towers, entities,
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
                 ability_hud=ability_hud)
-            if defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
+            if (defending_incoming_push
+                    and cid in INCOMING_PUSH_CORE_DEFENDERS):
+                entry = self._mask_to_heavy_defense_role(
+                    entry, cid, incoming_push['lane'])
+            elif defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
                 entry = self._mask_to_defensive_lane(
                     entry, defensive_lane_gate['threat_lane'])
             elif (preparing_for_push
@@ -1719,6 +1786,14 @@ class FeatureAdapter:
                      'incoming_push_reserve_defenders': bool(
                          incoming_push and incoming_push.get('reserve_core_defenders')),
                      'incoming_push_preparing': preparing_for_push,
+                     'incoming_push_defending': defending_incoming_push,
+                     'heavy_defend_cannon_release_depth': (
+                         HEAVY_DEFEND_CANNON_RELEASE_DEPTH
+                         if defending_incoming_push else None),
+                     'heavy_defend_cannon_held': bool(
+                         defending_incoming_push
+                         and heavy_core_depth is not None
+                         and heavy_core_depth > HEAVY_DEFEND_CANNON_RELEASE_DEPTH),
                      'incoming_push_hard_reserve_cards': (
                          sorted(INCOMING_PUSH_HARD_RESERVE_CARDS)
                          if preparing_for_push else []),
