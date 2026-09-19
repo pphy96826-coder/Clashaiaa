@@ -1246,15 +1246,33 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(recovered[-1]['replacement_card'], prior_cycle[0])
         self.assertFalse(recovered[-1]['slot_remains_blocked'])
 
-    def test_card_ack_timeout_adapts_but_stays_bounded(self):
-        self.executor._ack_latency_samples_ms[:] = [720.0, 880.0, 960.0]
+    def test_card_ack_timeout_starts_at_live_safe_floor(self):
+        self.executor._ack_latency_samples_ms.clear()
+        self.executor.end_to_end_latency_ms = 100.0
+
+        timeout = self.executor._card_ack_timeout_seconds()
+
+        self.assertEqual(timeout, config.CARD_ACK_TIMEOUT_BASE_SECONDS)
+        self.assertEqual(timeout, 1.1)
+
+    def test_card_ack_timeout_can_expand_past_legacy_1200_cap(self):
+        self.executor._ack_latency_samples_ms[:] = [1000.0, 1040.0, 1060.0]
         self.executor.end_to_end_latency_ms = 180.0
 
         timeout = self.executor._card_ack_timeout_seconds()
 
-        self.assertGreaterEqual(timeout, 1.0)
+        self.assertGreater(timeout, 1.2)
         self.assertLessEqual(timeout, config.CARD_ACK_TIMEOUT_MAX_SECONDS)
-        self.assertGreaterEqual(timeout, 1.14)
+
+    def test_card_ack_timeout_adapts_but_stays_bounded(self):
+        self.executor._ack_latency_samples_ms[:] = [1800.0, 2100.0, 2400.0]
+        self.executor.end_to_end_latency_ms = 180.0
+
+        timeout = self.executor._card_ack_timeout_seconds()
+
+        self.assertGreaterEqual(timeout, config.CARD_ACK_TIMEOUT_BASE_SECONDS)
+        self.assertEqual(timeout, config.CARD_ACK_TIMEOUT_MAX_SECONDS)
+        self.assertEqual(timeout, 1.4)
 
     def test_sent_action_cost_is_reserved_once_not_twice(self):
         s = state()
