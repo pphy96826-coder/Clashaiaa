@@ -628,11 +628,11 @@ class ActionExecutor:
                                  max(0.0, float(guard['hard_expires_at']) - now) * 1000))
                 continue
             # The positive ACK proved the card was consumed even though the
-            # hand snapshot is still stale. Never reopen that exact native
-            # slot/card until authoritative rotation; otherwise the policy can
-            # replay an impossible stale card.  Only the extra virtual spend
-            # reservation is bounded so unrelated slots can keep using the
-            # live elixir value after a generous reconciliation window.
+            # hand snapshot is still stale. Timeout alone never reopens that
+            # exact native slot/card; only authoritative hand rotation or a
+            # unique native cycle/other-hand partition may recover it. The
+            # extra virtual spend reservation itself stays bounded so unrelated
+            # slots can keep using the live elixir value.
             self._clear_spend(int(guard['command_seq']))
             if not guard.get('stale_logged'):
                 guard['stale_logged'] = True
