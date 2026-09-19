@@ -2,6 +2,7 @@
 import copy
 import io
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -13,6 +14,7 @@ from agent.feature_adapter import FeatureAdapter
 from agent.execution import ActionExecutor
 from bridge.coordinates import ScreenCalibration
 from bridge.probe_client import ProbeClient
+from bridge import lifecycle_screen
 from native_runner.contracts import ActionV1, ActionKind, TargetKind
 
 
@@ -23,6 +25,39 @@ def state(tick, terminal=False, opponent=456):
     if terminal:
         raw['battle_result'] = {'validated': True, 'finalized': True, 'world_result_raw': 0}
     return ProbeClient(account_id=123).parse(raw)
+
+
+class LifecycleScreenReaderTests(unittest.TestCase):
+    def test_reader_uses_active_python_virtualenv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            python = Path(tmp) / 'active-venv' / 'bin' / 'python'
+            python.parent.mkdir(parents=True)
+            reader = python.parent / 'lifecycle-ocr'
+            reader.write_text('ready', encoding='utf-8')
+            with patch.object(lifecycle_screen.config, 'VENV_PYTHON', python):
+                self.assertEqual(lifecycle_screen.ensure_reader(), reader)
+
+    def test_missing_reader_is_built_from_repo_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            python = root / 'active-venv' / 'bin' / 'python'
+            python.parent.mkdir(parents=True)
+            source = root / 'repo' / 'tools' / 'lifecycle_ocr.m'
+            source.parent.mkdir(parents=True)
+            source.write_text('int main(void) { return 0; }', encoding='utf-8')
+
+            def fake_run(command, **kwargs):
+                Path(command[-1]).write_text('binary', encoding='utf-8')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+            with patch.object(lifecycle_screen.config, 'VENV_PYTHON', python), \
+                    patch.object(lifecycle_screen.config, 'BASE_DIR', root / 'repo'), \
+                    patch.object(lifecycle_screen.shutil, 'which', return_value='/usr/bin/xcrun'), \
+                    patch.object(lifecycle_screen.subprocess, 'run', side_effect=fake_run):
+                reader = lifecycle_screen.ensure_reader()
+
+            self.assertEqual(reader, python.parent / 'lifecycle-ocr')
+            self.assertTrue(reader.is_file())
 
 
 class ContinuousLifecycleUnitTests(unittest.TestCase):
