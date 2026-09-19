@@ -30,6 +30,8 @@ class PendingAction:
     threat_ids: frozenset = frozenset()
     threat_target: tuple[float, float] | None = None
     ack_timeout_seconds: float = 0.0
+    prior_cycle: tuple[int, ...] | None = None
+    prior_raw_hand_card: int | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,11 @@ class ActionExecutor:
         # that exact slot/card locally blocked until the authoritative hand
         # transition arrives, without freezing other slots.
         self.slot_consume_guards = {}
+        # When the native cycle has advanced but one hand slot is still stale,
+        # keep a conservative effective-card overlay for that slot. The raw
+        # hand remains untouched for ACK evidence; policy/validation receive
+        # only cycle-proven replacements.
+        self.slot_hand_overrides = {}
         self.unconfirmed_spend = []
         self.predictions = []
         self.threat_reservations = []
@@ -104,6 +111,7 @@ class ActionExecutor:
         self.spawn_watch.clear()
         self.cooldowns.clear()
         self.slot_consume_guards.clear()
+        self.slot_hand_overrides.clear()
         self.unconfirmed_spend.clear()
         self.predictions.clear()
         self.threat_reservations.clear()
@@ -383,6 +391,132 @@ class ActionExecutor:
                      decision_tick=pending.decision_tick, status='ack_watch',
                      command_seq=pending.command_seq)
         self.reset()
+
+    def _raw_player(self, state, owner=None):
+        if state is None:
+            return None
+        target_owner = state.local_owner if owner is None else owner
+        return next(
+            (p for p in state.raw.get('players', [])
+             if int(p.get('owner', -1)) == int(target_owner)),
+            None,
+        )
+
+    def _raw_hand_card(self, state, slot, owner=None):
+        player = self._raw_player(state, owner)
+        if player is None:
+            return None
+        for row in player.get('hand', []):
+            if int(row.get('slot', -1)) == int(slot):
+                return max(0, int(row.get('card_id', 0)))
+        return 0
+
+    def _native_cycle(self, state, owner=None):
+        player = self._raw_player(state, owner)
+        if player is None:
+            return None
+        raw = player.get('cycle')
+        if raw is None:
+            return None
+        try:
+            cycle = tuple(int(card) for card in raw)
+        except (TypeError, ValueError):
+            return None
+        if len(cycle) != 4 or len(set(cycle)) != 4:
+            return None
+        return cycle
+
+    @staticmethod
+    def _expected_cycle_after_play(prior_cycle, card_id):
+        if prior_cycle is None or len(prior_cycle) != 4:
+            return None
+        return tuple(prior_cycle[1:]) + (int(card_id),)
+
+    def _cycle_confirms_play(self, pending, state):
+        current = self._native_cycle(state, pending.action.owner)
+        expected = self._expected_cycle_after_play(
+            pending.prior_cycle, pending.action.card_id)
+        return expected is not None and current == expected
+
+    def _infer_slot_card_from_cycle(self, state, slot):
+        """Infer one stale slot only when deck/cycle/other slots force it."""
+        if state is None or self.slot_hand_overrides.keys() - {int(slot)}:
+            return None
+        cycle = self._native_cycle(state)
+        deck = tuple(int(card) for card in state.deck_cards)
+        if cycle is None or len(deck) != 8 or len(set(deck)) != 8:
+            return None
+        other = []
+        for other_slot in range(4):
+            if other_slot == int(slot):
+                continue
+            card = self._raw_hand_card(state, other_slot)
+            if card is None or card <= 0:
+                return None
+            other.append(int(card))
+        if len(set(other)) != 3 or set(other) & set(cycle):
+            return None
+        candidates = set(deck) - set(cycle) - set(other)
+        if len(candidates) != 1:
+            return None
+        card = next(iter(candidates))
+        return card if card > 0 else None
+
+    def _apply_slot_hand_overrides(self, state):
+        if state is None:
+            return
+        for slot, override in list(self.slot_hand_overrides.items()):
+            raw_card = self._raw_hand_card(state, slot)
+            stale_card = int(override['stale_card'])
+            if raw_card is None:
+                override['valid'] = False
+                continue
+            if int(raw_card) != stale_card:
+                del self.slot_hand_overrides[slot]
+                self.log('slot_hand_override_cleared',
+                         command_seq=override['command_seq'],
+                         slot=slot,
+                         stale_card=stale_card,
+                         replacement_card=override.get('card_id'),
+                         reason='native_hand_caught_up')
+                continue
+            inferred = self._infer_slot_card_from_cycle(state, slot)
+            if inferred is None or inferred == stale_card:
+                override['valid'] = False
+                continue
+            previous = override.get('card_id')
+            override['card_id'] = int(inferred)
+            override['valid'] = True
+            state.hand_cards[slot] = int(inferred)
+            if previous is not None and int(previous) != int(inferred):
+                self.log('slot_hand_override_advanced',
+                         command_seq=override['command_seq'],
+                         slot=slot,
+                         previous_card=int(previous),
+                         replacement_card=int(inferred),
+                         evidence='native_cycle_hand_partition')
+
+    def _recover_slot_override(self, state, slot, stale_card, command_seq,
+                               replacement_card=None, evidence='native_cycle_hand_partition'):
+        if replacement_card is None:
+            replacement_card = self._infer_slot_card_from_cycle(state, slot)
+        if replacement_card is None or int(replacement_card) == int(stale_card):
+            return False
+        self.slot_hand_overrides[int(slot)] = {
+            'stale_card': int(stale_card),
+            'card_id': int(replacement_card),
+            'command_seq': int(command_seq),
+            'valid': True,
+        }
+        state.hand_cards[int(slot)] = int(replacement_card)
+        self.log('slot_consume_guard_recovered',
+                 command_seq=command_seq,
+                 slot=slot,
+                 stale_card=int(stale_card),
+                 replacement_card=int(replacement_card),
+                 evidence=evidence,
+                 slot_remains_blocked=False)
+        return True
 
     def _start_slot_consume_guard(self, pending, now, evidence):
         slot = pending.action.hand_slot
