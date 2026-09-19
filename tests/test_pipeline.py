@@ -216,6 +216,50 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(any(row[x] for row in defensive['row_major'] for x in range(0, 9)))
         self.assertTrue(any(row[x] for row in defensive['row_major'] for x in range(9, 18)))
 
+    def test_low_elixir_near_tower_pressure_holds_hog(self):
+        a, s = self.adapter()
+        s.elixir = 6.0
+        add_enemy(s, 9101, 3500, 11000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertFalse(o.action_mask.hand_slots[2])  # Hog Rider
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_hold_attack_defense',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['attack_hold_reason'],
+            'near_tower_defense',
+        )
+        self.assertLessEqual(
+            o.action_mask.reasons['attack_hold_distance'],
+            7000.0,
+        )
+
+    def test_high_elixir_can_keep_hog_available_under_pressure(self):
+        a, s = self.adapter()
+        s.elixir = 9.0
+        add_enemy(s, 9102, 3500, 11000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertIsNone(o.action_mask.reasons['attack_hold_reason'])
+
+    def test_distant_enemy_does_not_hold_hog(self):
+        a, s = self.adapter()
+        s.elixir = 6.0
+        add_enemy(s, 9103, 3500, 16000, card_id=26000021)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertIsNone(o.action_mask.reasons['attack_hold_reason'])
+
     def test_missing_initial_towers_do_not_open_pockets(self):
         s = state()
         s.entities.pop()
