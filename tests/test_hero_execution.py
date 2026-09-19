@@ -1,4 +1,7 @@
 import copy
+import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import Mock
 import unittest
@@ -6,7 +9,7 @@ import unittest
 import test_ability_state
 from agent.execution import ActionExecutor
 from bridge.probe_client import ProbeClient
-from bridge.hero_execution import ABILITY
+from bridge.hero_execution import ABILITY, ability_button, ensure_ability_calibration
 from native_runner.contracts import ActionV1, ActionKind
 
 
@@ -183,6 +186,55 @@ class HeroExecutionTests(unittest.TestCase):
         _, obs = adapter.tensorize(self.state)
         self.assertFalse(obs.action_mask.hand_slots[1])
         self.assertFalse(adapter.hero_musketeer)
+
+    def test_missing_ability_calibration_bootstraps_measured_button(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ability_calibration.local.json'
+
+            point, generated = ensure_ability_calibration(
+                path, (1080, 1920))
+
+            self.assertTrue(generated)
+            self.assertEqual(point, (940, 1480))
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            self.assertTrue(payload['verified'])
+            self.assertEqual(payload['ability_id'], ABILITY)
+            self.assertEqual(payload['controller_slot'], 1)
+            self.assertEqual(payload['source'],
+                             'measured_single_controller_hud_v1')
+            self.assertEqual(
+                ability_button(path, (1080, 1920)),
+                (940, 1480),
+            )
+
+    def test_existing_ability_calibration_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ability.json'
+            payload = {
+                'ability_id': ABILITY,
+                'controller_slot': 1,
+                'verified': True,
+                'size': [1080, 1920],
+                'point': [950, 1490],
+            }
+            path.write_text(json.dumps(payload), encoding='utf-8')
+
+            point, generated = ensure_ability_calibration(
+                path, (1080, 1920))
+
+            self.assertFalse(generated)
+            self.assertEqual(point, (950, 1490))
+            self.assertEqual(
+                json.loads(path.read_text(encoding='utf-8')),
+                payload,
+            )
+
+    def test_auto_ability_calibration_rejects_changed_aspect_ratio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ability.json'
+            with self.assertRaisesRegex(ValueError, 'aspect ratio'):
+                ensure_ability_calibration(path, (1000, 1000))
+            self.assertFalse(path.exists())
 
     def test_unavailable_button_calibration_keeps_hero_deploy_but_disables_skill(self):
         self.adapter.hero_skill_ready = False
