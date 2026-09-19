@@ -68,6 +68,11 @@ class ActionExecutor:
         self.future = None
         self.active = None
         self.cooldowns = {}
+        # A non-hand ACK (spawn/elixir) proves the input probably landed but
+        # does not prove that the native hand snapshot has rotated yet. Keep
+        # that exact slot/card locally blocked until the authoritative hand
+        # transition arrives, without freezing other slots.
+        self.slot_consume_guards = {}
         self.unconfirmed_spend = []
         self.predictions = []
         self.threat_reservations = []
@@ -94,6 +99,7 @@ class ActionExecutor:
         self.ack_watch.clear()
         self.spawn_watch.clear()
         self.cooldowns.clear()
+        self.slot_consume_guards.clear()
         self.unconfirmed_spend.clear()
         self.predictions.clear()
         self.threat_reservations.clear()
@@ -329,10 +335,49 @@ class ActionExecutor:
                      command_seq=pending.command_seq)
         self.reset()
 
+    def _start_slot_consume_guard(self, pending, now, evidence):
+        slot = pending.action.hand_slot
+        if slot is None:
+            return
+        self.slot_consume_guards[int(slot)] = {
+            'card_id': int(pending.action.card_id or 0),
+            'command_seq': int(pending.command_seq),
+            'evidence': str(evidence),
+            'expires_at': float(now) + float(config.ELIXIR_RESERVATION_SECONDS),
+        }
+        self.log('slot_consume_guard_started',
+                 command_seq=pending.command_seq,
+                 card=pending.action.card_id,
+                 slot=slot,
+                 evidence=evidence,
+                 ttl_ms=round(config.ELIXIR_RESERVATION_SECONDS * 1000))
+
+    def _prune_slot_consume_guards(self, state, now=None):
+        if state is None:
+            return
+        if now is None:
+            now = time.perf_counter()
+        for slot, guard in list(self.slot_consume_guards.items()):
+            card_id = int(guard['card_id'])
+            rotated = state.hand_cards[slot] != card_id
+            expired = now >= float(guard['expires_at'])
+            if not rotated and not expired:
+                continue
+            del self.slot_consume_guards[slot]
+            self._clear_spend(int(guard['command_seq']))
+            self.log('slot_consume_guard_cleared',
+                     command_seq=guard['command_seq'],
+                     card=card_id,
+                     slot=slot,
+                     evidence=guard['evidence'],
+                     reason='hand_rotation' if rotated else 'timeout')
+
     def blocked_slots(self, state):
         blocked = {p.action.hand_slot for p in (*self.pending, *self.ack_watch, *self.spawn_watch)
                    if p.action.hand_slot is not None}
         now = time.perf_counter()
+        self._prune_slot_consume_guards(state, now)
+        blocked.update(self.slot_consume_guards)
         for slot, (card, until) in list(self.cooldowns.items()):
             if state.hand_cards[slot] != card or now >= until:
                 del self.cooldowns[slot]
@@ -563,6 +608,7 @@ class ActionExecutor:
         if getattr(state, 'native_finalized', False) is True:
             self.end_battle()
             return
+        self._prune_slot_consume_guards(state, now)
         for pending in list(self.pending):
             if pending.state == 'sent' and self.future is None:
                 self.pending.remove(pending)
@@ -697,14 +743,39 @@ class ActionExecutor:
                 # downward threshold, and the original hand check remains
                 # authoritative whenever it is available.
                 elixir_changed = False
-                allow_elixir_fallback = len(self.ack_watch) == 1
+                # If an earlier accepted action still lacks authoritative hand
+                # rotation, a new aggregate elixir drop is not uniquely
+                # attributable. Keep the newer action on ACK watch until a
+                # hand/spawn signal arrives instead of stealing the old drop.
+                allow_elixir_fallback = (
+                    len(self.ack_watch) == 1
+                    and not self.slot_consume_guards
+                )
                 if (allow_elixir_fallback and pending.prior_elixir is not None
                         and state.elixir is not None):
                     elixir_changed = (state.tick > pending.sent_tick and
                         float(state.elixir) <= float(pending.prior_elixir) - pending.cost + 0.15)
                 if hand_changed or elixir_changed or spawn_ack:
                     self.ack_watch.remove(pending)
-                    self._clear_spend(pending.command_seq)
+                    ack_evidence = (
+                        'hand_rotation' if hand_changed else
+                        'elixir_cost_drop' if elixir_changed else
+                        spawn_ack_evidence or 'new_source_entity'
+                    )
+                    if hand_changed:
+                        self._clear_spend(pending.command_seq)
+                    else:
+                        # Prevent the same stale native slot/card from being
+                        # selected again on the very frame that supplied only
+                        # a weak positive ACK. Other slots remain eligible.
+                        self._start_slot_consume_guard(
+                            pending, now, ack_evidence)
+                        # An observed elixir drop already accounts for the
+                        # spend in the live resource value. A spawn-only ACK
+                        # does not, so keep its short-lived virtual spend until
+                        # hand rotation/guard expiry reconciles the snapshot.
+                        if elixir_changed:
+                            self._clear_spend(pending.command_seq)
                     self.log('hand_ack', card=action.card_id, slot=action.hand_slot,
                         command_seq=pending.command_seq,
                         tick=state.tick, latency_ms=(now-ack_started_at)*1000,
@@ -712,9 +783,7 @@ class ActionExecutor:
                         input_to_ack_ms=(now-ack_started_at)*1000,
                         input_start_to_ack_ms=(now-pending.sent_at)*1000,
                         outcome='accepted',
-                        evidence=('hand_rotation' if hand_changed else
-                                  'elixir_cost_drop' if elixir_changed else
-                                  spawn_ack_evidence or 'new_source_entity'),
+                        evidence=ack_evidence,
                         spawn_entity_id=spawn_entity_id)
                     if action.card_id in BINDINGS and action.metadata.get('policy_effective_form_code') == 1:
                         player = next(p for p in state.raw['players'] if p['owner'] == action.owner)
