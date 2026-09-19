@@ -322,6 +322,68 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertFalse(o.action_mask.reasons['attack_opportunity_active'])
 
+    def test_prepare_defense_reserves_fireball_and_locks_cycle_to_push_lane(self):
+        raw = opening()
+        hand = (26000010, 26000014, 27000000, 28000000)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'incoming-push-resource-lock')
+        s.elixir = 10.0
+        add_enemy(s, 9197, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+
+        _, prep = a.tensorize(s)
+
+        self.assertEqual(
+            prep.action_mask.reasons['strategy_phase'], 'prepare_defense')
+        self.assertTrue(
+            prep.action_mask.reasons['incoming_push_preparing'])
+
+        # Cheap cycle stays available, but every high-value defensive resource
+        # is protected while the heavy core is still deep in the back.
+        self.assertTrue(prep.action_mask.hand_slots[0])
+        self.assertFalse(prep.action_mask.hand_slots[1])
+        self.assertFalse(prep.action_mask.hand_slots[2])
+        self.assertFalse(prep.action_mask.hand_slots[3])
+        self.assertEqual(
+            prep.action_mask.reasons['slot_reasons']['3'],
+            'strategy_reserve_incoming_push_spell',
+        )
+
+        cycle = prep.action_mask.placement_masks['0']
+        self.assertEqual(cycle['incoming_push_lane'], 'left')
+        self.assertEqual(
+            cycle['incoming_push_max_defensive_depth'], 14000.0)
+        self.assertTrue(any(
+            row[x] for row in cycle['row_major'] for x in range(0, 9)))
+        self.assertFalse(any(
+            row[x] for row in cycle['row_major'] for x in range(9, 18)))
+        for y, row in enumerate(cycle['row_major']):
+            if any(row):
+                self.assertLessEqual((y + 0.5) * 1000.0, 14000.0)
+
+        # Once the push is actually in our defensive half, preparation locks
+        # must release so Fireball and the normal defense policy can respond.
+        giant = next(ent for ent in s.entities if ent['id'] == 9197)
+        giant['y'] = 14000
+        s.tick += 1
+        _, defend = a.tensorize(s)
+
+        self.assertEqual(defend.action_mask.reasons['strategy_phase'], 'defend')
+        self.assertFalse(
+            defend.action_mask.reasons['incoming_push_preparing'])
+        self.assertTrue(defend.action_mask.hand_slots[3])
+        self.assertNotEqual(
+            defend.action_mask.reasons['slot_reasons']['3'],
+            'strategy_reserve_incoming_push_spell',
+        )
+
     def test_incoming_push_releases_and_lanes_cannon_as_core_approaches(self):
         raw = opening()
         hand = (27000000, 26000010, 26000021, 26000030)
@@ -355,8 +417,13 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(near.action_mask.hand_slots[0])
         cannon = near.action_mask.placement_masks['0']
         self.assertEqual(cannon['incoming_push_lane'], 'left')
+        self.assertEqual(
+            cannon['incoming_push_max_defensive_depth'], 14000.0)
         self.assertTrue(any(row[x] for row in cannon['row_major'] for x in range(0, 9)))
         self.assertFalse(any(row[x] for row in cannon['row_major'] for x in range(9, 18)))
+        for y, row in enumerate(cannon['row_major']):
+            if any(row):
+                self.assertLessEqual((y + 0.5) * 1000.0, 14000.0)
 
     def test_exact_heavy_play_binds_unknown_runtime_carrier(self):
         raw = opening()
