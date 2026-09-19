@@ -977,11 +977,15 @@ class ActionExecutor:
                     pending.ack_timeout_seconds = ack_timeout_seconds
                 raw_hand_card = self._authoritative_hand_card(
                     state, action.hand_slot, action.owner)
+                hand_baseline = (
+                    int(pending.prior_raw_hand_card)
+                    if pending.prior_raw_hand_card is not None
+                    else int(action.card_id)
+                )
                 hand_changed = (
                     state.tick > pending.sent_tick
-                    and pending.prior_raw_hand_card is not None
                     and raw_hand_card is not None
-                    and int(raw_hand_card) != int(pending.prior_raw_hand_card)
+                    and int(raw_hand_card) != hand_baseline
                 )
                 cycle_changed = (
                     state.tick > pending.sent_tick
