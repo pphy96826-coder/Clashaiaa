@@ -40,11 +40,14 @@ from bridge.reference_events import ReferenceEvents
 
 HOG_26_DECK = (26000010, 26000014, 26000021, 26000030, 26000038, 27000000, 28000000, 28000011)
 HOG_RIDER = 26000021
+FIREBALL = 28000000
 MINER = 26000032
 DEFENSIVE_LANE_CARDS = frozenset((26000010, 26000014, 26000030, 26000038, 27000000))
 COUNTERPUSH_SUPPORT_CARDS = frozenset((26000014, 203000014, 26000038))
+NEUTRAL_PATIENCE_CARDS = frozenset((HOG_RIDER, MUSKETEER, FIREBALL))
 ATTACK_HOLD_TOWER_DISTANCE = 7000.0
 ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR = 8.0
+NEUTRAL_PATIENCE_RELEASE_ELIXIR = 8.5
 COUNTERPUSH_MIN_PROGRESS = 9000.0
 COUNTERPUSH_MAX_PROGRESS = 17000.0
 
@@ -648,6 +651,26 @@ class FeatureAdapter:
             'support_hp_fraction': best['hp_fraction'],
         }
 
+    def _has_defensive_pressure(self):
+        """Whether any live enemy is already in the central/defensive half.
+
+        Neutral patience must never suppress a real defensive response just
+        because threats are split across lanes or are not yet inside the
+        stricter near-tower radius.
+        """
+        for ent in self._live_entities.values():
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+            if int(ent.get('card_id', -1)) <= 0:
+                continue
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+            y = float(ent['y'])
+            if min(y, 32000.0 - y) <= 14500.0:
+                return True
+        return False
+
     def _single_defensive_threat_lane(self):
         """Return one unambiguous nearby enemy lane, otherwise None."""
         enemy = []
@@ -1011,12 +1034,18 @@ class FeatureAdapter:
         self.quality['defensive_threat_lane'] = (
             defensive_lane_gate['threat_lane'] if defensive_lane_gate else None)
         near_tower_pressure = self._near_tower_pressure()
+        defensive_pressure = self._has_defensive_pressure()
         attack_hold = self._attack_hold_context(elixir, near_tower_pressure)
-        counterpush = self._counterpush_context(near_tower_pressure)
+        counterpush = self._counterpush_context(
+            True if defensive_pressure else near_tower_pressure)
         strategy_phase = (
-            'defend' if near_tower_pressure is not None else
+            'defend' if defensive_pressure or near_tower_pressure is not None else
             'counterpush' if counterpush is not None else
             'neutral'
+        )
+        neutral_patience = (
+            strategy_phase == 'neutral'
+            and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
         )
         self.quality['strategy_phase'] = strategy_phase
         self.quality['attack_hold_reason'] = (
@@ -1027,6 +1056,7 @@ class FeatureAdapter:
             counterpush['lane'] if counterpush else None)
         self.quality['counterpush_support_entity_id'] = (
             counterpush['support_entity_id'] if counterpush else None)
+        self.quality['neutral_patience_active'] = neutral_patience
         for slot, cid in slots.items():
             spec = self.bundle.card_specs[cid]
             if selections is not None:
@@ -1057,6 +1087,9 @@ class FeatureAdapter:
                 continue
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
+                continue
+            if neutral_patience and cid in NEUTRAL_PATIENCE_CARDS:
+                slot_reasons[str(slot)] = 'strategy_neutral_patience'
                 continue
             entry = self.build_placement_mask(cid, lanes, towers, entities,
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
@@ -1101,7 +1134,9 @@ class FeatureAdapter:
                      'counterpush_support_entity_id': (
                          counterpush['support_entity_id'] if counterpush else None),
                      'counterpush_support_card_id': (
-                         counterpush['support_card_id'] if counterpush else None)})
+                         counterpush['support_card_id'] if counterpush else None),
+                     'neutral_patience_active': neutral_patience,
+                     'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR})
         crowns = {}
         for owner in (0, 1):
             enemy = [t for t in towers if t.owner != owner]
