@@ -858,6 +858,70 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.hand_slots[3])
         self.assertTrue(o.action_mask.kinds['wait'])
 
+    def test_distant_cheap_enemy_does_not_disable_local_low_value_gate(self):
+        raw = opening()
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+            26000010,  # Skeletons
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'local-low-value-with-distant-noise')
+        s.elixir = 7.0
+        add_enemy(
+            s, 9333, 3500, 11000,
+            card_id=26000030, hp=190,
+        )
+        add_enemy(
+            s, 9334, 14500, 25000,
+            card_id=26000010, hp=100,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_active'])
+        self.assertEqual(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_entity_id'],
+            9333,
+        )
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertTrue(o.action_mask.hand_slots[3])
+
+    def test_lone_one_elixir_near_tower_does_not_hard_hold_hog(self):
+        a, s = self.adapter()
+        s.elixir = 6.0
+        add_enemy(
+            s, 9335, 3500, 11000,
+            card_id=26000030, hp=190,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_active'])
+        self.assertIsNone(
+            o.action_mask.reasons['attack_hold_reason'])
+        self.assertTrue(o.action_mask.hand_slots[2])
+
     def test_single_one_elixir_threat_overflow_only_forces_cheap_cycle(self):
         raw = opening()
         hand = (

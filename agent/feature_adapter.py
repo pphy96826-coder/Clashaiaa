@@ -1425,14 +1425,17 @@ class FeatureAdapter:
             'lane': incoming_push['lane'],
         }
 
-    def _attack_hold_context(self, effective_elixir, pressure=None):
-        """Conservatively hold Hog when a live enemy is already near our tower.
+    def _attack_hold_context(
+            self, effective_elixir, pressure=None, low_value_threat=None):
+        """Conservatively hold Hog for meaningful near-tower pressure.
 
-        This is a macro safety gate, not an attack recommender.  It only
-        suppresses the win condition when committing four elixir would leave
-        too little budget to answer an immediate near-tower threat.
+        A lone one-elixir body is already covered by the cheap-defense gate and
+        should not independently freeze the win condition.  More substantial
+        pressure keeps the original budget-preservation behavior.
         """
         if float(effective_elixir) >= ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR:
+            return None
+        if low_value_threat is not None:
             return None
         pressure = pressure if pressure is not None else self._near_tower_pressure()
         if pressure is None:
@@ -1687,15 +1690,16 @@ class FeatureAdapter:
             if hp is not None and float(hp) <= 0:
                 continue
 
-            enemy.append(ent)
+            depth = self._defensive_depth(ent['y'])
+            if depth > 14500.0:
+                continue
+
+            enemy.append((ent, depth))
 
         if len(enemy) != 1:
             return None
 
-        ent = enemy[0]
-        depth = self._defensive_depth(ent['y'])
-        if depth > 14500.0:
-            return None
+        ent, depth = enemy[0]
 
         card_id = int(ent.get('card_id', -1))
         spec = self.bundle.card_specs.get(card_id)
@@ -2717,7 +2721,10 @@ class FeatureAdapter:
         )
 
         attack_hold = self._attack_hold_context(
-            elixir, near_tower_pressure)
+            elixir,
+            near_tower_pressure,
+            low_value_threat=low_value_defensive_threat,
+        )
 
         counterpush = self._counterpush_context(
             True
