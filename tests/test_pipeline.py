@@ -1669,6 +1669,58 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertTrue(o.action_mask.hand_slots[1])
 
+    def test_heavy_defense_priority_skips_no_legal_position_card(self):
+        raw = opening()
+        hand = (26000014, 26000038, 27000000, 26000010)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-priority-placement')
+        s.elixir = 10.0
+
+        add_enemy(s, 9212, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9212)
+        giant['y'] = 13000
+        s.tick += 1
+
+        original = a.build_placement_mask
+
+        def mask_musketeer(card_id, *args, **kwargs):
+            entry = original(card_id, *args, **kwargs)
+            if int(card_id) == 26000014:
+                entry = dict(entry)
+                entry['row_major'] = tuple(
+                    tuple(False for _ in row)
+                    for row in entry['row_major']
+                )
+            return entry
+
+        with patch.object(a, 'build_placement_mask', side_effect=mask_musketeer):
+            _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_stage'],
+            'backline_then_body',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_card_id'],
+            26000038,
+        )
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'no_legal_position',
+        )
+        self.assertTrue(o.action_mask.hand_slots[1])
+
     def test_heavy_defense_emergency_releases_core_sequence(self):
         raw = opening()
         hand = (26000014, 27000000, 26000038, 26000010)

@@ -3125,15 +3125,6 @@ class FeatureAdapter:
                     'strategy_hold_fireball_for_heavy_support'
                 )
                 continue
-            if (defending_incoming_push
-                    and not heavy_priority.get('emergency')
-                    and heavy_priority_card is not None
-                    and cid in HEAVY_DEFEND_SERIAL_CARDS
-                    and cid != heavy_priority_card):
-                slot_reasons[str(slot)] = (
-                    'strategy_wait_heavy_defense_priority'
-                )
-                continue
             if (preparing_for_push
                     and cid in INCOMING_PUSH_HARD_RESERVE_CARDS):
                 slot_reasons[str(slot)] = (
@@ -3324,6 +3315,45 @@ class FeatureAdapter:
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
                 masks[str(slot)] = entry
+
+        if (
+            defending_incoming_push
+            and not heavy_priority.get('emergency')
+        ):
+            playable_serial_slots = {
+                slot: cid
+                for slot, cid in slots.items()
+                if (
+                    playable[slot]
+                    and int(cid) in HEAVY_DEFEND_SERIAL_CARDS
+                )
+            }
+            heavy_priority = self._heavy_defense_priority(
+                playable_serial_slots,
+                heavy_core_depth,
+                effective_elixir=elixir,
+                blocked_slots=(),
+            )
+            heavy_priority_card = heavy_priority.get('card_id')
+
+            if heavy_priority_card is not None:
+                for slot, cid in slots.items():
+                    if (
+                        not playable[slot]
+                        or int(cid) not in HEAVY_DEFEND_SERIAL_CARDS
+                        or int(cid) == int(heavy_priority_card)
+                    ):
+                        continue
+                    playable[slot] = False
+                    masks.pop(str(slot), None)
+                    slot_reasons[str(slot)] = (
+                        'strategy_wait_heavy_defense_priority'
+                    )
+
+            self.quality['heavy_defend_priority_card_id'] = (
+                heavy_priority_card)
+            self.quality['heavy_defend_priority_stage'] = (
+                heavy_priority.get('stage'))
 
         # WAIT must stay legal in V4. These slots define the structural
         # spend used only when a near-cap defensive WAIT would waste elixir.
