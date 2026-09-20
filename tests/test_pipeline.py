@@ -2453,16 +2453,16 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.reasons['neutral_patience_active'])
         self.assertTrue(o.action_mask.kinds['wait'])
         self.assertTrue(o.action_mask.hand_slots[0])  # Skeletons stay available.
-        self.assertFalse(o.action_mask.hand_slots[1])  # Musketeer held.
-        self.assertFalse(o.action_mask.hand_slots[2])  # Hog held.
-        self.assertTrue(o.action_mask.hand_slots[3])  # Ice Spirit stays available.
+        self.assertTrue(o.action_mask.hand_slots[1])   # Musketeer may set up.
+        self.assertFalse(o.action_mask.hand_slots[2])  # Hog held while behind.
+        self.assertTrue(o.action_mask.hand_slots[3])   # Ice Spirit stays available.
         self.assertEqual(
             o.action_mask.reasons['slot_reasons']['1'],
-            'strategy_neutral_patience',
+            'playable',
         )
         self.assertEqual(
             o.action_mask.reasons['slot_reasons']['2'],
-            'strategy_neutral_patience',
+            'strategy_resource_deficit_attack_hold',
         )
 
     def test_neutral_patience_relaxes_when_no_cycle_card_is_available(self):
@@ -2493,17 +2493,23 @@ class AdapterTests(unittest.TestCase):
             o.action_mask.reasons['strategy_phase'],
             'neutral',
         )
-        self.assertFalse(
-            o.action_mask.reasons['neutral_patience_active'])
         self.assertTrue(
+            o.action_mask.reasons['neutral_patience_active'])
+        self.assertFalse(
             o.action_mask.reasons[
                 'neutral_patience_relaxed_no_cycle'])
-        for slot in range(4):
-            self.assertNotEqual(
-                o.action_mask.reasons['slot_reasons'][str(slot)],
-                'strategy_neutral_patience',
-            )
-            self.assertTrue(o.action_mask.hand_slots[slot])
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'strategy_resource_deficit_attack_hold',
+        )
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertFalse(o.action_mask.hand_slots[3])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['3'],
+            'no_legal_position',
+        )
 
     def test_neutral_patience_relaxes_when_cycle_form_is_not_executable(self):
         raw = opening()
@@ -2548,9 +2554,9 @@ class AdapterTests(unittest.TestCase):
 
         _, o = a.tensorize(s)
 
-        self.assertFalse(
-            o.action_mask.reasons['neutral_patience_active'])
         self.assertTrue(
+            o.action_mask.reasons['neutral_patience_active'])
+        self.assertFalse(
             o.action_mask.reasons[
                 'neutral_patience_relaxed_no_cycle'])
         self.assertFalse(o.action_mask.hand_slots[0])
@@ -2558,9 +2564,17 @@ class AdapterTests(unittest.TestCase):
             o.action_mask.reasons['slot_reasons']['0'],
             'special_form_execution_not_ready',
         )
-        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_resource_deficit_attack_hold',
+        )
         self.assertTrue(o.action_mask.hand_slots[2])
-        self.assertTrue(o.action_mask.hand_slots[3])
+        self.assertFalse(o.action_mask.hand_slots[3])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['3'],
+            'no_legal_position',
+        )
 
     def test_neutral_patience_relaxes_when_only_cycle_slot_is_blocked(self):
         raw = opening()
@@ -2586,9 +2600,9 @@ class AdapterTests(unittest.TestCase):
 
         _, o = a.tensorize(s, blocked_slots=(0,))
 
-        self.assertFalse(
-            o.action_mask.reasons['neutral_patience_active'])
         self.assertTrue(
+            o.action_mask.reasons['neutral_patience_active'])
+        self.assertFalse(
             o.action_mask.reasons[
                 'neutral_patience_relaxed_no_cycle'])
         self.assertFalse(o.action_mask.hand_slots[0])
@@ -2596,9 +2610,13 @@ class AdapterTests(unittest.TestCase):
             o.action_mask.reasons['slot_reasons']['0'],
             'pending_or_cooldown',
         )
-        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_resource_deficit_attack_hold',
+        )
         self.assertTrue(o.action_mask.hand_slots[2])
-        self.assertTrue(o.action_mask.hand_slots[3])
+        self.assertFalse(o.action_mask.hand_slots[3])
 
     def test_neutral_patience_holds_cannon_but_keeps_cheap_cycle(self):
         raw = opening()
@@ -2618,10 +2636,10 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
         self.assertTrue(o.action_mask.reasons['neutral_patience_active'])
-        self.assertFalse(o.action_mask.hand_slots[0])  # Cannon held.
+        self.assertTrue(o.action_mask.hand_slots[0])  # Cannon remains a legal setup.
         self.assertEqual(
             o.action_mask.reasons['slot_reasons']['0'],
-            'strategy_neutral_patience',
+            'playable',
         )
         self.assertTrue(o.action_mask.hand_slots[1])  # Skeletons available.
         self.assertTrue(o.action_mask.hand_slots[2])  # Ice Spirit available.
@@ -2719,7 +2737,7 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(o.action_mask.hand_slots[2])
         self.assertEqual(
             o.action_mask.reasons['slot_reasons']['2'],
-            'strategy_neutral_patience',
+            'strategy_resource_deficit_attack_hold',
         )
 
     def test_exact_building_cycle_window_stays_open_until_four_public_plays(self):
@@ -2815,26 +2833,111 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(context['reason'], 'enemy_building_out_of_cycle')
         self.assertEqual(context['card_id'], 27000000)
 
-    def test_neutral_patience_releases_near_elixir_cap(self):
+    def test_resource_board_value_scales_with_surviving_hp(self):
         a, s = self.adapter()
-        s.elixir = 8.5
+        s.elixir = 7.0
+        s.entities.append({
+            'id': 9395,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 3500,
+            'y': 5000,
+            'hp': 500,
+            'max_hp': 1000,
+        })
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertAlmostEqual(
+            o.action_mask.reasons['resource_own_board_value'],
+            2.0,
+            places=2,
+        )
+
+    def test_resource_deficit_holds_only_attack_commitment(self):
+        raw = opening()
+        hand = (
+            26000014,
+            27000000,
+            26000021,
+            28000000,
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+        raw['players'][0]['elixir'] = 7.0
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'resource-deficit-placement')
+        add_enemy(s, 9396, 3500, 26000, card_id=26000014, hp=1000)
+        add_enemy(s, 9397, 14500, 26000, card_id=26000014, hp=1000)
         s.tick += 1
 
         _, o = a.tensorize(s)
 
         self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertEqual(o.action_mask.reasons['resource_posture'], 'defend')
+        self.assertAlmostEqual(
+            o.action_mask.reasons['resource_opponent_board_value'],
+            8.0,
+            places=2,
+        )
+        self.assertTrue(o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_resource_deficit_attack_hold',
+        )
+        self.assertTrue(o.action_mask.hand_slots[3])
+        fireball = o.action_mask.placement_masks['3']
+        self.assertEqual(
+            fireball['resource_deficit_fireball_target_count'],
+            2,
+        )
+
+    def test_neutral_patience_releases_near_elixir_cap(self):
+        a, s = self.adapter()
+        s.elixir = 7.0
+        s.entities.append({
+            'id': 9398,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 3500,
+            'y': 5000,
+            'hp': 1000,
+            'max_hp': 1000,
+        })
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(o.action_mask.reasons['strategy_phase'], 'neutral')
+        self.assertEqual(o.action_mask.reasons['resource_posture'], 'attack')
+        self.assertAlmostEqual(
+            o.action_mask.reasons['resource_own_board_value'],
+            4.0,
+            places=2,
+        )
         self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
         self.assertTrue(o.action_mask.reasons['attack_opportunity_active'])
         self.assertEqual(
             o.action_mask.reasons['attack_opportunity_reason'],
-            'near_elixir_cap',
+            'resource_advantage',
         )
         self.assertEqual(
             o.action_mask.reasons['attack_opportunity_kind'],
-            'anti_overflow',
+            'resource_advantage',
         )
-        self.assertTrue(o.action_mask.hand_slots[1])
-        self.assertTrue(o.action_mask.hand_slots[3])
+        self.assertTrue(o.action_mask.hand_slots[2])
 
     def test_neutral_overflow_wait_fallback_prefers_cheap_cycle(self):
         raw = opening()
@@ -3334,6 +3437,116 @@ class ExecutorTests(unittest.TestCase):
             self.executor._post_action_settle_tick,
             -1,
         )
+
+    def _enable_test_card_costs(self):
+        costs = {
+            26000003: 5.0,
+            26000010: 1.0,
+            26000014: 4.0,
+            26000021: 4.0,
+            26000030: 1.0,
+            26000038: 2.0,
+            27000000: 3.0,
+            28000000: 4.0,
+            28000011: 2.0,
+        }
+        self.executor.card_cost_resolver = (
+            lambda cid: costs.get(int(cid), 0.0)
+        )
+
+    @staticmethod
+    def _with_cost(action, cost):
+        return replace(
+            action,
+            metadata={
+                **dict(action.metadata),
+                'policy_effective_cost': float(cost),
+            },
+        )
+
+    def test_threat_budget_allows_fast_followup_inside_large_push_cost(self):
+        self._enable_test_card_costs()
+        s = state()
+        add_enemy(s, 9801, 3500, 11000, card_id=26000003, hp=3000)
+        add_enemy(s, 9802, 4200, 11500, card_id=26000014, hp=1000)
+
+        first = self._with_cost(
+            play(slot=0, card=26000010, grid=(3, 11)), 1.0)
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        self.assertTrue(self.executor._commit_threat_reservation(
+            pending, s, time.perf_counter(), confidence='provisional'))
+
+        s.hand_cards[1] = 26000014
+        second = self._with_cost(
+            play(slot=1, card=26000014, grid=(3, 11)), 4.0)
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertEqual(len(self.executor.pending), 1)
+        released = [
+            data for event, data in self.events
+            if event == 'threat_reservation_budget_released'
+        ]
+        self.assertTrue(released)
+        self.assertEqual(released[-1]['attack_budget'], 9.0)
+        self.assertEqual(released[-1]['projected_defense'], 5.0)
+        self.assertEqual(released[-1]['budget_limit'], 10.0)
+
+    def test_threat_budget_blocks_overspend_on_small_threat(self):
+        self._enable_test_card_costs()
+        s = state()
+        add_enemy(s, 9811, 3500, 11000, card_id=26000030, hp=100)
+
+        first = self._with_cost(
+            play(slot=0, card=26000010, grid=(3, 11)), 1.0)
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        self.assertTrue(self.executor._commit_threat_reservation(
+            pending, s, time.perf_counter(), confidence='provisional'))
+
+        s.hand_cards[1] = 26000014
+        second = self._with_cost(
+            play(slot=1, card=26000014, grid=(3, 11)), 4.0)
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertFalse(self.executor.pending)
+        exhausted = [
+            data for event, data in self.events
+            if event == 'threat_reservation_budget_exhausted'
+        ]
+        self.assertTrue(exhausted)
+        self.assertEqual(exhausted[-1]['attack_budget'], 1.0)
+        self.assertEqual(exhausted[-1]['committed_defense'], 1.0)
+
+    def test_threat_budget_reopens_when_support_joins_push(self):
+        self._enable_test_card_costs()
+        s = state()
+        add_enemy(s, 9821, 3500, 11000, card_id=26000003, hp=3000)
+
+        first = self._with_cost(
+            play(slot=0, card=28000000, grid=(3, 11)), 4.0)
+        s.hand_cards[0] = 28000000
+        self.executor.submit(SimpleNamespace(actions=(first,)), s)
+        pending = self.executor.pending.pop(0)
+        self.assertTrue(self.executor._commit_threat_reservation(
+            pending, s, time.perf_counter(), confidence='provisional'))
+
+        s.hand_cards[1] = 26000014
+        second = self._with_cost(
+            play(slot=1, card=26000014, grid=(3, 11)), 4.0)
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertFalse(self.executor.pending)
+
+        add_enemy(s, 9822, 4200, 11500, card_id=26000014, hp=1000)
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+        self.assertEqual(len(self.executor.pending), 1)
+        released = [
+            data for event, data in self.events
+            if event == 'threat_reservation_budget_released'
+        ]
+        self.assertTrue(released)
+        self.assertEqual(released[-1]['attack_budget'], 9.0)
+        self.assertEqual(released[-1]['projected_defense'], 8.0)
 
     def test_wait_does_not_touch(self):
         self.executor.submit(SimpleNamespace(actions=(ActionV1(owner=0,kind=ActionKind.WAIT),)), state())
