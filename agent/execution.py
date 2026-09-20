@@ -56,6 +56,8 @@ class ThreatReservation:
     # re-observed. Keep a lightweight spatial/card signature as a fallback.
     threat_card_ids: frozenset = frozenset()
     threat_anchor: tuple[float, float] | None = None
+    defense_cost: float = 0.0
+    attack_budget: float = 0.0
 
 
 class ActionExecutor:
@@ -87,7 +89,11 @@ class ActionExecutor:
     # again just because the spell/troop effect has not rendered yet. After a
     # genuinely newer probe frame and this delay, the residual threat is
     # re-evaluated instead of being hard-blocked until every body disappears.
-    THREAT_REACTION_HOLD_SECONDS = 0.50
+    # Resource budget is the primary repeated-defense gate. Keep only a very
+    # short render grace for unsupported/unknown-cost threats.
+    THREAT_REACTION_HOLD_SECONDS = 0.12
+    THREAT_BUDGET_RADIUS_WORLD = 6500.0
+    THREAT_LARGE_PUSH_MARGIN_COST = 1.0
     # Residual threat must never be judged while the original card is still
     # awaiting its ACK outcome. Once that outcome arrives, start a new,
     # shorter effect-observation window from the ACK/timeout itself. Spells
@@ -104,8 +110,10 @@ class ActionExecutor:
     # is decided from residual threat, not from this long TTL.
     THREAT_PROVISIONAL_ACK_GRACE_SECONDS = 0.30
 
-    def __init__(self, actuator, log, dry_run=False, on_ability_ack=None, max_actions=None):
+    def __init__(self, actuator, log, dry_run=False, on_ability_ack=None,
+                 max_actions=None, card_cost_resolver=None):
         self.actuator, self.log, self.dry_run = actuator, log, dry_run
+        self.card_cost_resolver = card_cost_resolver
         self.on_ability_ack = on_ability_ack
         if max_actions is not None and (type(max_actions) is not int or max_actions <= 0):
             raise ValueError('max_actions must be a positive integer or None')
@@ -233,10 +241,46 @@ class ActionExecutor:
         if enemy_id <= 0:
             return False
 
-        return (
-            enemy_id
-            in self.prelock_reserved_threat_ids(state)
-        )
+        if enemy_id not in self.prelock_reserved_threat_ids(state):
+            return False
+
+        enemy = next((
+            entity for entity in state.entities
+            if int(entity.get('id', -1)) == enemy_id
+        ), None)
+
+        if enemy is not None and self.card_cost_resolver is not None:
+            x, y = enemy.get('x'), enemy.get('y')
+            if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                target = (float(x), float(y))
+                attack_budget = self._local_live_card_cost(
+                    state,
+                    1 - int(state.local_owner),
+                    target,
+                    int(state.local_owner),
+                )
+                board_defense = self._local_live_card_cost(
+                    state,
+                    int(state.local_owner),
+                    target,
+                    int(state.local_owner),
+                )
+                reserved_defense = self._local_reserved_defense_cost(
+                    int(state.local_owner),
+                    target,
+                )
+                committed = max(board_defense, reserved_defense)
+                margin = (
+                    self.THREAT_LARGE_PUSH_MARGIN_COST
+                    if attack_budget >= 5.0 else 0.0
+                )
+                if (
+                    attack_budget > 0.0
+                    and committed < attack_budget + margin
+                ):
+                    return False
+
+        return True
 
     def interrupt_post_action_recheck(self, context, state):
         """Allow a genuinely new urgent threat to bypass the old preview."""
@@ -386,6 +430,149 @@ class ActionExecutor:
     @staticmethod
     def _on_own_half(owner, y):
         return float(y) <= 16000.0 if owner == 0 else float(y) >= 16000.0
+
+    def _card_cost(self, card_id):
+        if self.card_cost_resolver is None:
+            return 0.0
+        try:
+            value = float(self.card_cost_resolver(int(card_id)))
+        except (TypeError, ValueError, KeyError):
+            return 0.0
+        return value if math.isfinite(value) and value > 0.0 else 0.0
+
+    def _entity_source_card_id(self, entity):
+        origin = entity.get('deployment_origin')
+        if isinstance(origin, dict):
+            source = origin.get('source_card_id')
+            if isinstance(source, int) and self._card_cost(source) > 0.0:
+                return int(source)
+        cid = entity.get('card_id')
+        if isinstance(cid, int) and self._card_cost(cid) > 0.0:
+            return int(cid)
+        return None
+
+    @staticmethod
+    def _entity_budget_group_key(entity, source_card_id):
+        origin = entity.get('deployment_origin')
+        if isinstance(origin, dict):
+            epoch = origin.get('epoch')
+            sequence = origin.get('sequence')
+            if isinstance(epoch, int) and isinstance(sequence, int):
+                return (
+                    'deployment',
+                    int(entity.get('owner', -1)),
+                    epoch,
+                    sequence,
+                )
+        return (
+            'local-card',
+            int(entity.get('owner', -1)),
+            int(source_card_id),
+        )
+
+    def _local_live_card_cost(self, state, unit_owner, target, reference_owner):
+        """Full surviving source-card cost in one local defensive cluster."""
+        tx, ty = map(float, target)
+        radius_sq = self.THREAT_BUDGET_RADIUS_WORLD ** 2
+        groups = {}
+        for entity in state.entities:
+            if int(entity.get('owner', -1)) != int(unit_owner):
+                continue
+            hp = entity.get('hp')
+            x, y = entity.get('x'), entity.get('y')
+            if (
+                not isinstance(hp, (int, float))
+                or float(hp) <= 0.0
+                or not isinstance(x, (int, float))
+                or not isinstance(y, (int, float))
+                or not self._on_own_half(reference_owner, y)
+                or (float(x) - tx) ** 2 + (float(y) - ty) ** 2 > radius_sq
+            ):
+                continue
+            source = self._entity_source_card_id(entity)
+            if source is None:
+                continue
+            key = self._entity_budget_group_key(entity, source)
+            groups[key] = max(
+                groups.get(key, 0.0),
+                self._card_cost(source),
+            )
+        return sum(groups.values())
+
+    def _local_reserved_defense_cost(self, owner, target):
+        tx, ty = map(float, target)
+        radius_sq = self.THREAT_BUDGET_RADIUS_WORLD ** 2
+        seen = set()
+        total = 0.0
+        for reservation in self.threat_reservations:
+            seq = int(getattr(reservation, 'command_seq', -1))
+            if seq in seen:
+                continue
+            anchor = getattr(reservation, 'target', None)
+            if (
+                int(getattr(reservation, 'owner', -1)) != int(owner)
+                or not isinstance(anchor, tuple)
+                or len(anchor) != 2
+            ):
+                continue
+            if (
+                (float(anchor[0]) - tx) ** 2
+                + (float(anchor[1]) - ty) ** 2
+                > radius_sq
+            ):
+                continue
+            seen.add(seq)
+            total += max(
+                0.0,
+                float(getattr(reservation, 'defense_cost', 0.0)),
+            )
+        return total
+
+    def _defense_budget_context(self, action, state):
+        if (
+            self.card_cost_resolver is None
+            or action.kind.value != 'play_card'
+            or action.target_grid is None
+        ):
+            return None
+        target = action_world(action)
+        attack_budget = self._local_live_card_cost(
+            state,
+            1 - int(action.owner),
+            target,
+            int(action.owner),
+        )
+        if attack_budget <= 0.0:
+            return None
+
+        board_defense = self._local_live_card_cost(
+            state,
+            int(action.owner),
+            target,
+            int(action.owner),
+        )
+        reserved_defense = self._local_reserved_defense_cost(
+            int(action.owner),
+            target,
+        )
+        committed = max(board_defense, reserved_defense)
+        margin = (
+            self.THREAT_LARGE_PUSH_MARGIN_COST
+            if attack_budget >= 5.0 else 0.0
+        )
+        limit = attack_budget + margin
+        candidate_cost = float(
+            action.metadata.get('policy_effective_cost', 0.0) or 0.0
+        )
+        return {
+            'attack_budget': attack_budget,
+            'board_defense': board_defense,
+            'reserved_defense': reserved_defense,
+            'committed_defense': committed,
+            'budget_limit': limit,
+            'candidate_cost': candidate_cost,
+            'remaining_before_action': max(0.0, limit - committed),
+        }
 
     @staticmethod
     def _live_entity_ids(state):
@@ -595,6 +782,40 @@ class ActionExecutor:
                     action, state, reservation, threat_ids)
             if not matched_ids:
                 continue
+
+            budget = self._defense_budget_context(action, state)
+            if budget is not None:
+                if budget['committed_defense'] < budget['budget_limit']:
+                    self.log(
+                        'threat_reservation_budget_released',
+                        command_seq=reservation.command_seq,
+                        card=reservation.card_id,
+                        threat_ids=sorted(matched_ids),
+                        attack_budget=round(budget['attack_budget'], 2),
+                        committed_defense=round(
+                            budget['committed_defense'], 2),
+                        candidate_cost=round(
+                            budget['candidate_cost'], 2),
+                        budget_limit=round(budget['budget_limit'], 2),
+                        remaining_before_action=round(
+                            budget['remaining_before_action'], 2),
+                    )
+                    return None, threat_ids
+
+                self.log(
+                    'threat_reservation_budget_exhausted',
+                    command_seq=reservation.command_seq,
+                    card=reservation.card_id,
+                    threat_ids=sorted(matched_ids),
+                    attack_budget=round(budget['attack_budget'], 2),
+                    committed_defense=round(
+                        budget['committed_defense'], 2),
+                    candidate_cost=round(
+                        budget['candidate_cost'], 2),
+                    budget_limit=round(budget['budget_limit'], 2),
+                )
+                return reservation, matched_ids
+
             suppress, reason, residual_ratio = (
                 self._reservation_still_suppresses(
                     reservation, state, now, matched_ids))
@@ -692,6 +913,7 @@ class ActionExecutor:
             now + ttl,
             suppress_until + self.THREAT_MOSTLY_HANDLED_GRACE_SECONDS + 0.05,
         )
+        budget = self._defense_budget_context(pending.action, state)
         reservation = ThreatReservation(
             command_seq=pending.command_seq,
             owner=int(pending.action.owner),
@@ -706,6 +928,11 @@ class ActionExecutor:
             baseline_hp=baseline_hp,
             threat_card_ids=threat_card_ids,
             threat_anchor=threat_anchor,
+            defense_cost=float(pending.cost),
+            attack_budget=(
+                float(budget['attack_budget'])
+                if budget is not None else 0.0
+            ),
         )
         self.threat_reservations[:] = [
             row for row in self.threat_reservations
@@ -723,6 +950,10 @@ class ActionExecutor:
                      0, round((suppress_until - now) * 1000)),
                  baseline_count=baseline_count,
                  baseline_hp=round(baseline_hp, 1),
+                 defense_cost=round(float(pending.cost), 2),
+                 attack_budget=(
+                     round(float(budget['attack_budget']), 2)
+                     if budget is not None else None),
                  threat_card_ids=sorted(threat_card_ids),
                  threat_anchor=(list(threat_anchor)
                                 if threat_anchor is not None else None))
