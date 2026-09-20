@@ -645,11 +645,15 @@ class AdapterTests(unittest.TestCase):
                 'backfield_commitment_lane'],
             'left',
         )
-        self.assertFalse(
+        self.assertEqual(
+            o.action_mask.reasons['resource_posture'],
+            'defend',
+        )
+        self.assertTrue(
             o.action_mask.reasons['neutral_patience_active'])
 
-        # A visible medium commitment is context, not a phase takeover.
-        # Leave normal tactical choices to the model.
+        # The commitment contributes to the resource ledger, but does not
+        # seize the phase or hard-lock defensive/setup cards.
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertTrue(o.action_mask.hand_slots[1])
         self.assertTrue(o.action_mask.hand_slots[2])
@@ -672,9 +676,17 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertTrue(
             o.action_mask.reasons['backfield_commitment_advisory'])
-        self.assertFalse(
+        self.assertEqual(
+            o.action_mask.reasons['resource_posture'],
+            'defend',
+        )
+        self.assertTrue(
             o.action_mask.reasons['neutral_patience_active'])
-        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_resource_deficit_attack_hold',
+        )
 
     def test_backfield_overflow_cycles_instead_of_forcing_core_defender(self):
         raw = opening()
