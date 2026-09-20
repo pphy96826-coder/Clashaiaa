@@ -3074,15 +3074,6 @@ class FeatureAdapter:
             if prelock is not None and cid == HOG_RIDER:
                 slot_reasons[str(slot)] = 'strategy_prelock_defense'
                 continue
-            if (
-                defense_overflow_active
-                and strategy_phase == 'defend'
-                and cid == HOG_RIDER
-            ):
-                slot_reasons[str(slot)] = (
-                    'strategy_hold_attack_defense_overflow'
-                )
-                continue
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue

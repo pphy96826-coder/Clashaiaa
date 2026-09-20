@@ -1154,7 +1154,7 @@ class AdapterTests(unittest.TestCase):
             o.action_mask.reasons[
                 'low_value_defensive_threat_active'])
 
-    def test_live_defense_overflow_disables_wait_and_offensive_hog(self):
+    def test_live_defense_overflow_keeps_hog_as_model_choice_not_fallback(self):
         a, s = self.adapter()
 
         s.elixir = 10.0
@@ -1177,19 +1177,14 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(
             o.action_mask.reasons[
                 'defense_overflow_forced'])
+        self.assertTrue(o.action_mask.kinds['wait'])
 
-        # At ten elixir with a real threat on our side, waiting is no longer
-        # legal. The policy must choose among actual defensive actions.
-        self.assertTrue(
-            o.action_mask.kinds['wait'])
-
-        # Slot 2 in the normal 2.6 opening is Hog Rider. Do not solve defensive
-        # overflow by sending four elixir away from the defense.
-        self.assertFalse(o.action_mask.hand_slots[2])
-        self.assertEqual(
-            o.action_mask.reasons['slot_reasons']['2'],
-            'strategy_hold_attack_defense_overflow',
-        )
+        # Anti-overflow only supplies a defensive WAIT fallback. It must not
+        # erase a proactive Hog choice from the model at high resources.
+        self.assertTrue(o.action_mask.hand_slots[2])
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertNotEqual(fallback.card_id, 26000021)
 
 
     def test_live_defense_overflow_fallback_prefers_cheap_control_before_core(self):
