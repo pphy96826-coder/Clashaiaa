@@ -2868,16 +2868,55 @@ class FeatureAdapter:
             else {'card_id': None, 'stage': None, 'emergency': False}
         )
         heavy_priority_card = heavy_priority.get('card_id')
+        blocked_slot_set = {int(v) for v in blocked_slots}
+
+        def neutral_cycle_slot_available(slot, cid):
+            cid = int(cid)
+            slot = int(slot)
+            spec = self.bundle.card_specs.get(cid)
+
+            if (
+                cid in NEUTRAL_PATIENCE_CARDS
+                or slot in blocked_slot_set
+                or spec is None
+                or float(spec.elixir_cost) > float(elixir)
+            ):
+                return False
+
+            if selections is None:
+                return True
+
+            selected = selections.get(cid) or {}
+            active_form = selected.get('active_form')
+            selected_cost = selected.get('selected_cost')
+
+            if active_form is None or selected_cost is None:
+                return False
+            if float(selected_cost) != float(spec.elixir_cost):
+                return False
+
+            supported_hero = (
+                self.hero_musketeer
+                and cid == MUSKETEER
+                and active_form == 2
+            )
+            supported_evolution = (
+                self.skeleton_evolution
+                and active_form == 1
+                and cid in evolution_by_card
+                and evolution_by_card[cid].ready is True
+            )
+
+            return (
+                active_form == 0
+                or supported_hero
+                or supported_evolution
+            )
+
         neutral_patience_safe_slots = [
             slot
             for slot, cid in slots.items()
-            if (
-                int(cid) not in NEUTRAL_PATIENCE_CARDS
-                and int(slot) not in {int(v) for v in blocked_slots}
-                and self.bundle.card_specs.get(int(cid)) is not None
-                and float(self.bundle.card_specs[int(cid)].elixir_cost)
-                    <= float(elixir)
-            )
+            if neutral_cycle_slot_available(slot, cid)
         ]
         neutral_patience_relaxed_no_cycle = bool(
             strategy_phase == 'neutral'

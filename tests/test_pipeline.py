@@ -2116,6 +2116,56 @@ class AdapterTests(unittest.TestCase):
             )
             self.assertTrue(o.action_mask.hand_slots[slot])
 
+    def test_neutral_patience_relaxes_when_cycle_form_is_not_executable(self):
+        raw = opening()
+        hand = (
+            26000010,  # Skeletons
+            26000021,  # Hog Rider
+            26000014,  # Musketeer
+            28000000,  # Fireball
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+        raw['players'][0]['elixir'] = 7.0
+        raw['players'][0]['card_runtime'] = [
+            {
+                'card_id': cid,
+                'active_form': 1 if cid == 26000010 else 0,
+                'selected_cost': (
+                    1 if cid == 26000010
+                    else 4 if cid in (26000021, 26000014, 28000000)
+                    else 0
+                ),
+            }
+            for cid in HOG_26_DECK
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter(skeleton_evolution=False)
+        a.reset_match(s, 'neutral-patience-form-unavailable')
+
+        _, o = a.tensorize(s)
+
+        self.assertFalse(
+            o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'neutral_patience_relaxed_no_cycle'])
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'special_form_execution_not_ready',
+        )
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertTrue(o.action_mask.hand_slots[3])
+
     def test_neutral_patience_relaxes_when_only_cycle_slot_is_blocked(self):
         raw = opening()
         hand = (
