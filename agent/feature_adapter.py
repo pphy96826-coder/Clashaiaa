@@ -2345,6 +2345,20 @@ class FeatureAdapter:
             return None
         target_x, _ = action_world(action)
         target_lane = 'left' if target_x < 9000.0 else 'right'
+
+        # The policy mask may intentionally keep a core heavy-push defender on
+        # the tracked tank lane while cheap control answers an immediate
+        # opposite-lane distractor. Do not let this redundant live validator
+        # overturn that higher-context assignment.
+        if int(action.card_id or 0) in HEAVY_DEFEND_SERIAL_CARDS:
+            incoming_push = self._incoming_push_context()
+            if (
+                incoming_push is not None
+                and incoming_push.get('lane') is not None
+                and target_lane == incoming_push.get('lane')
+            ):
+                return None
+
         if target_lane == gate['threat_lane']:
             return None
         return {'target_lane': target_lane,

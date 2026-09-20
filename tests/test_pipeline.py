@@ -203,6 +203,76 @@ class AdapterTests(unittest.TestCase):
         hog = o.action_mask.placement_masks['2']
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
 
+    def test_live_lane_validator_respects_tracked_heavy_defender_lane(self):
+        raw = opening()
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            26000010,  # Skeletons
+            28000000,  # Fireball
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'validator-heavy-lane')
+        s.elixir = 10.0
+
+        add_enemy(
+            s, 9003, 3500, 26000,
+            card_id=26000003, hp=3000,
+        )
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9003)
+        giant['y'] = 13000
+        add_enemy(
+            s, 9004, 14500, 10000,
+            card_id=26000010, hp=100,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        musk = o.action_mask.placement_masks['0']
+        target = next(
+            (x, y)
+            for y, row in enumerate(musk['row_major'])
+            for x, allowed in enumerate(row)
+            if allowed
+        )
+        action = ActionV1(
+            owner=s.local_owner,
+            kind=ActionKind.PLAY_CARD,
+            hand_slot=0,
+            card_id=26000014,
+            target_kind=TargetKind.GRID,
+            target_grid=target,
+            execute_offset_ticks=1,
+            next_decision_ticks=5,
+            metadata={
+                'policy_effective_cost': 4.0,
+                'policy_effective_form_code': 0,
+            },
+        )
+
+        self.assertEqual(musk['heavy_defense_lane'], 'left')
+        self.assertEqual(
+            o.action_mask.reasons['defensive_threat_lane'],
+            'right',
+        )
+        self.assertIsNone(
+            a.defensive_lane_conflict(action, s)
+        )
+
     def test_split_lane_threat_does_not_mask_defensive_lane(self):
         a, s = self.adapter()
         add_enemy(s, 9001, 3500, 11000, card_id=26000021)
