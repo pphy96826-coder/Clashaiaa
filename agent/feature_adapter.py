@@ -2173,12 +2173,17 @@ class FeatureAdapter:
             }
 
         else:
+            # Ordinary live defense should not turn a model WAIT into an
+            # expensive commitment by default. Spend the cheapest useful
+            # control first; core defenders remain available as a last resort.
             priority = {
-                MUSKETEER: 0,
-                CANNON: 1,
-                ICE_GOLEM: 2,
-                ICE_SPIRIT: 3,
-                SKELETONS: 4,
+                SKELETONS: 0,
+                ICE_SPIRIT: 1,
+                THE_LOG: 2,
+                ICE_GOLEM: 3,
+                CANNON: 4,
+                MUSKETEER: 5,
+                FIREBALL: 6,
             }
 
         candidates = []

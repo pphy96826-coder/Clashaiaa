@@ -943,6 +943,48 @@ class AdapterTests(unittest.TestCase):
         )
 
 
+    def test_live_defense_overflow_fallback_prefers_cheap_control_before_core(self):
+        raw = opening()
+        hand = (
+            26000010,  # Skeletons
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            26000030,  # Ice Spirit
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'live-defense-overflow-cheap-first')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9330, 3500, 11000,
+            card_id=26000021, hp=1400,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_mode'],
+            'live_defense',
+        )
+        fallback = a.defense_overflow_fallback(s, o)
+
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000010)
+        self.assertEqual(
+            fallback.metadata['defense_overflow_mode'],
+            'live_defense',
+        )
+
     def test_overflow_builds_backline_before_cycle_and_cannon(self):
         raw = opening()
 
