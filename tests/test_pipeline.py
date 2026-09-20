@@ -290,6 +290,154 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(any(row[x] for row in defensive['row_major'] for x in range(0, 9)))
         self.assertTrue(any(row[x] for row in defensive['row_major'] for x in range(9, 18)))
 
+    def test_counter_assignment_prefers_cannon_for_hog(self):
+        raw = opening()
+        hand = (
+            27000000,  # Cannon
+            26000014,  # Musketeer
+            28000000,  # Fireball
+            26000010,  # Skeletons
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'counter-assign-hog')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9051, 14500, 11000,
+            card_id=26000021, hp=1400,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(len(o.action_mask.reasons['threat_groups']), 1)
+        assignments = o.action_mask.reasons['counter_assignments']
+        self.assertTrue(assignments)
+        self.assertEqual(assignments[0]['card_id'], 27000000)
+        self.assertEqual(assignments[0]['threat_group_lane'], 'right')
+        self.assertGreater(assignments[0]['score'], 5.0)
+        self.assertEqual(
+            o.action_mask.reasons['reserved_counter_cards']['27000000'],
+            assignments[0]['threat_group_id'],
+        )
+
+    def test_counter_assignment_reserves_cannon_for_hog_over_other_lane_support(self):
+        raw = opening()
+        hand = (
+            27000000,  # Cannon
+            26000014,  # Musketeer
+            28000000,  # Fireball
+            26000010,  # Skeletons
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'counter-assign-split')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9052, 3500, 11000,
+            card_id=26000014, hp=1000,
+        )
+        add_enemy(
+            s, 9053, 14500, 11000,
+            card_id=26000021, hp=1400,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        groups = o.action_mask.reasons['threat_groups']
+        self.assertEqual(len(groups), 2)
+        assignments = {
+            row['threat_group_lane']: row
+            for row in o.action_mask.reasons['counter_assignments']
+        }
+        self.assertEqual(assignments['right']['card_id'], 27000000)
+        self.assertEqual(assignments['left']['card_id'], 26000014)
+
+        cannon = o.action_mask.placement_masks['0']
+        self.assertEqual(cannon['counter_assignment_lane'], 'right')
+        self.assertFalse(any(
+            row[x]
+            for row in cannon['row_major']
+            for x in range(0, 9)
+        ))
+        self.assertTrue(any(
+            row[x]
+            for row in cannon['row_major']
+            for x in range(9, 18)
+        ))
+
+        musketeer = o.action_mask.placement_masks['1']
+        self.assertEqual(
+            musketeer['counter_assignment_lane'], 'left')
+        self.assertTrue(any(
+            row[x]
+            for row in musketeer['row_major']
+            for x in range(0, 9)
+        ))
+        self.assertFalse(any(
+            row[x]
+            for row in musketeer['row_major']
+            for x in range(9, 18)
+        ))
+
+    def test_two_lane_threats_receive_distinct_core_counter_assignments(self):
+        raw = opening()
+        hand = (
+            27000000,
+            26000014,
+            28000000,
+            26000038,
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'counter-assign-two-lane')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9054, 3500, 10500,
+            card_id=26000014, hp=1000,
+        )
+        add_enemy(
+            s, 9055, 14500, 11500,
+            card_id=26000021, hp=1400,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        assignments = o.action_mask.reasons['counter_assignments']
+        by_lane = {
+            row['threat_group_lane']: row['card_id']
+            for row in assignments
+        }
+        self.assertEqual(by_lane['left'], 26000014)
+        self.assertEqual(by_lane['right'], 27000000)
+        self.assertNotEqual(by_lane['left'], by_lane['right'])
+
     def test_low_elixir_near_tower_pressure_holds_hog(self):
         a, s = self.adapter()
         s.elixir = 6.0
@@ -3476,6 +3624,97 @@ class ExecutorTests(unittest.TestCase):
             },
         )
 
+    def test_threat_group_budget_on_left_does_not_block_right_hog(self):
+        self._enable_test_card_costs()
+        s = state()
+        s.hand_cards[0] = 28000000
+        s.hand_cards[1] = 27000000
+        add_enemy(
+            s, 9791, 3500, 11000,
+            card_id=26000014, hp=1000,
+        )
+        add_enemy(
+            s, 9792, 14500, 11000,
+            card_id=26000021, hp=1400,
+        )
+
+        left = self._with_cost(
+            play(slot=0, card=28000000, grid=(3, 11)),
+            4.0,
+        )
+        self.executor.submit(
+            SimpleNamespace(actions=(left,)), s)
+        pending = self.executor.pending.pop(0)
+        self.assertEqual(
+            pending.threat_group_lane, 'left')
+        self.assertTrue(
+            self.executor._commit_threat_reservation(
+                pending,
+                s,
+                time.perf_counter(),
+                confidence='provisional',
+            )
+        )
+
+        right = self._with_cost(
+            play(slot=1, card=27000000, grid=(14, 11)),
+            3.0,
+        )
+        self.executor.submit(
+            SimpleNamespace(actions=(right,)), s)
+
+        self.assertEqual(len(self.executor.pending), 1)
+        queued = self.executor.pending[0]
+        self.assertEqual(queued.action.card_id, 27000000)
+        self.assertEqual(queued.threat_group_lane, 'right')
+        self.assertNotEqual(
+            queued.threat_group_id,
+            pending.threat_group_id,
+        )
+
+    def test_same_lane_spatially_separate_threat_groups_keep_independent_budgets(self):
+        self._enable_test_card_costs()
+        s = state()
+        s.hand_cards[0] = 26000010
+        s.hand_cards[1] = 26000014
+        add_enemy(
+            s, 9793, 3500, 7000,
+            card_id=26000030, hp=100,
+        )
+        add_enemy(
+            s, 9794, 3500, 14000,
+            card_id=26000021, hp=1400,
+        )
+
+        near = self._with_cost(
+            play(slot=0, card=26000010, grid=(3, 7)),
+            1.0,
+        )
+        self.executor.submit(
+            SimpleNamespace(actions=(near,)), s)
+        pending = self.executor.pending.pop(0)
+        self.assertTrue(
+            self.executor._commit_threat_reservation(
+                pending,
+                s,
+                time.perf_counter(),
+                confidence='provisional',
+            )
+        )
+
+        far = self._with_cost(
+            play(slot=1, card=26000014, grid=(3, 14)),
+            4.0,
+        )
+        self.executor.submit(
+            SimpleNamespace(actions=(far,)), s)
+
+        self.assertEqual(len(self.executor.pending), 1)
+        self.assertNotEqual(
+            self.executor.pending[0].threat_group_id,
+            pending.threat_group_id,
+        )
+
     def test_threat_budget_allows_fast_followup_inside_large_push_cost(self):
         self._enable_test_card_costs()
         s = state()
@@ -3503,6 +3742,10 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(released[-1]['attack_budget'], 9.0)
         self.assertEqual(released[-1]['projected_defense'], 5.0)
         self.assertEqual(released[-1]['budget_limit'], 10.0)
+        self.assertIsNotNone(
+            released[-1]['threat_group_id'])
+        self.assertEqual(
+            released[-1]['threat_group_lane'], 'left')
 
     def test_threat_budget_blocks_overspend_on_small_threat(self):
         self._enable_test_card_costs()
@@ -3529,6 +3772,8 @@ class ExecutorTests(unittest.TestCase):
         self.assertTrue(exhausted)
         self.assertEqual(exhausted[-1]['attack_budget'], 1.0)
         self.assertEqual(exhausted[-1]['committed_defense'], 1.0)
+        self.assertIsNotNone(
+            exhausted[-1]['threat_group_id'])
 
     def test_threat_budget_reopens_when_support_joins_push(self):
         self._enable_test_card_costs()
