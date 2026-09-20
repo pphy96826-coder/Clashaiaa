@@ -300,7 +300,13 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertTrue(o.action_mask.hand_slots[3])
-        self.assertFalse(o.action_mask.hand_slots[2])
+        # Opposite-lane Hog remains a model choice against the proved heavy
+        # commitment; only the WAIT fallback prefers cheap cycle first.
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (0, 2, 3),
+        )
 
         # The heavy-commit opportunity still exists underneath the formation
         # priority. Once we are below the overflow threshold, Hog is released
@@ -637,6 +643,52 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(o.action_mask.hand_slots[1])
         self.assertFalse(o.action_mask.hand_slots[2])
         self.assertFalse(o.action_mask.hand_slots[3])
+
+    def test_backfield_overflow_fallback_does_not_mask_model_choices(self):
+        raw = opening()
+        hand = (
+            26000010,  # Skeletons
+            28000000,  # Fireball
+            26000021,  # Hog Rider
+            27000000,  # Cannon
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'backfield-overflow-advisory')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9337, 3500, 26000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_mode'],
+            'backfield_cycle',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (0,),
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertFalse(o.action_mask.hand_slots[3])
+
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000010)
 
     def test_generic_backfield_commitment_does_not_hard_reserve_fireball(self):
         raw = opening()

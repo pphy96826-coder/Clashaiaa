@@ -3338,6 +3338,16 @@ class FeatureAdapter:
                         and cannon_prebuild_allowed
                     ]
 
+                    hog_slots = sorted(
+                        slot
+                        for slot, cid in slots.items()
+                        if incoming_push is not None
+                        and hog_opportunity_release
+                        and playable[slot]
+                        and cid == HOG_RIDER
+                        and not self._active_enemy_buildings
+                    )
+
                     # If the tank is already close enough that the Cannon
                     # anchor should be established now, prefer it. Otherwise
                     # allow the cheap cycle first to work toward a second
@@ -3356,6 +3366,7 @@ class FeatureAdapter:
                         defense_overflow_safe_slots = sorted(
                             cycle_slots
                             + cannon_slots
+                            + hog_slots
                         )
                         defense_overflow_mode = (
                             'cycle_then_prebuild'
@@ -3365,25 +3376,14 @@ class FeatureAdapter:
 
                     elif cannon_slots:
                         defense_overflow_safe_slots = sorted(
-                            cannon_slots)
+                            cannon_slots
+                            + hog_slots)
                         defense_overflow_mode = (
                             'cannon_prebuild'
                         )
 
                     else:
-                        hog_slots = sorted(
-                            slot
-                            for slot, cid in slots.items()
-                            if playable[slot]
-                            and cid == HOG_RIDER
-                            and not self._active_enemy_buildings
-                        )
-
-                        if (
-                            incoming_push is not None
-                            and hog_opportunity_release
-                            and hog_slots
-                        ):
+                        if hog_slots:
                             defense_overflow_safe_slots = hog_slots
                             defense_overflow_mode = (
                                 'heavy_commit_hog_punish'
@@ -3408,21 +3408,26 @@ class FeatureAdapter:
                                 )
 
                 if defense_overflow_safe_slots:
-                    safe = set(
-                        defense_overflow_safe_slots)
+                    # Generic backfield patience only needs a WAIT fallback;
+                    # it must not erase otherwise legal model choices. A
+                    # tracked heavy push still uses the stricter formation
+                    # mask because those resources are purpose-reserved.
+                    if incoming_push is not None:
+                        safe = set(
+                            defense_overflow_safe_slots)
 
-                    for slot in range(4):
-                        if (
-                            not playable[slot]
-                            or slot in safe
-                        ):
-                            continue
+                        for slot in range(4):
+                            if (
+                                not playable[slot]
+                                or slot in safe
+                            ):
+                                continue
 
-                        playable[slot] = False
-                        masks.pop(str(slot), None)
-                        slot_reasons[str(slot)] = (
-                            'strategy_defense_overflow_formation'
-                        )
+                            playable[slot] = False
+                            masks.pop(str(slot), None)
+                            slot_reasons[str(slot)] = (
+                                'strategy_defense_overflow_formation'
+                            )
 
                     defense_overflow_forced = True
 
