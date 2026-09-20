@@ -16,7 +16,7 @@ if str(config.FIRSTLIGHT_DIR) not in sys.path:
 from native_runner.contracts import (ObservationV1, ObservationTier, PlayerStateV1,
     TowerStateV1, EntityStateV1, ActionMaskV1, TimeStateV1, TerminalV1, EventV1,
     TOWER_RUNTIME_SEMANTIC_FIELDS, ENTITY_RUNTIME_SEMANTIC_FIELDS, SemanticEvidenceLevel,
-    SemanticProvenanceV1, AttackPhase)
+    SemanticProvenanceV1, AttackPhase, ActionV1, ActionKind, TargetKind)
 from native_runner.arena import card_placement_mask, OccupiedFootprintV1, native_building_footprint
 from native_runner.training.v4.factory import production_semantic_bundle, _public_tracker_v4
 from native_runner.training.v4.tensorizer import UniversalObservationTensorizerV4, REL_TARGETS, REL_SOURCE_OF
@@ -81,6 +81,42 @@ INCOMING_PUSH_CORE_DEFENDERS = frozenset((MUSKETEER, CANNON))
 HEAVY_DEFEND_SERIAL_CARDS = frozenset((CANNON, MUSKETEER, ICE_GOLEM))
 HEAVY_DEFEND_CHEAP_CONTROL = frozenset((SKELETONS, ICE_SPIRIT))
 INCOMING_PUSH_HARD_RESERVE_CARDS = frozenset((FIREBALL,))
+
+# A visible medium/heavy troop deployed deep in the opponent backfield is a
+# commitment, but not yet something that warrants mirroring with an opposite-
+# lane Musketeer/Ice Golem or burning Cannon lifetime before engagement.
+BACKFIELD_COMMITMENT_MIN_COST = 3.0
+BACKFIELD_COMMITMENT_START_DEPTH = 22000.0
+BACKFIELD_COMMITMENT_RELEASE_DEPTH = 14500.0
+
+# Role-specific release windows.  Cannon is deliberately latest because its
+# lifetime is finite; Musketeer may establish the backline earlier, while Ice
+# Golem is staged close enough to become an actual body/kite.
+BACKFIELD_MUSKETEER_RELEASE_DEPTH = 16000.0
+BACKFIELD_ICE_GOLEM_RELEASE_DEPTH = 15000.0
+BACKFIELD_CANNON_RELEASE_DEPTH = 12500.0
+
+# Anti-overflow while defending/preparing.  At the soft threshold we may force
+# a proved safe cycle action.  The hard cap permits Ice Golem as a same-lane
+# body only when no cheaper safe release is available.
+DEFENSE_OVERFLOW_ELIXIR = 9.5
+DEFENSE_OVERFLOW_HARD_CAP_ELIXIR = 9.9
+DEFENSE_OVERFLOW_SAFE_CYCLE_CARDS = frozenset((SKELETONS, ICE_SPIRIT))
+
+# Cannon may be placed before the tank reaches its final pull radius, provided
+# the observed approach says the tank should arrive while the building still
+# has useful lifetime.  Nine seconds is intentionally conservative; the
+# fallback depth handles the first frame before velocity is measurable.
+CANNON_PREBUILD_MAX_LEAD_TICKS = 180
+CANNON_PREBUILD_URGENT_LEAD_TICKS = 90
+CANNON_PREBUILD_FALLBACK_DEPTH = 18000.0
+
+# Telemetry/replay frames can occasionally jump after a stale frame or a
+# synthetic test update. Such a jump must not make Cannon look "urgently"
+# due. Real troop movement is far below this ceiling in world units per native
+# tick, so values above it are treated as unreliable rather than extrapolated.
+CANNON_PREBUILD_MAX_REASONABLE_SPEED_PER_TICK = 500.0
+
 
 # Conservative impact envelopes in native world units.  They are deliberately
 # wider than the visual effect so a delayed spell cannot wake an inactive king
@@ -165,6 +201,7 @@ class FeatureAdapter:
         self._last_opponent_exact_play = None
         self._recent_opponent_heavy_plays = deque(maxlen=8)
         self._incoming_push_cores = {}
+        self._backfield_commitments = {}
         self._prelock_context = None
 
     def _effect_provenance(self, semantic, entity_id):
@@ -990,6 +1027,124 @@ class FeatureAdapter:
         self._prelock_context = best
         return best
 
+
+    def _backfield_commitment_context(self):
+        """Track visible 3+ elixir troops that were genuinely deployed deep.
+
+        Unlike incoming_push, this is not a declaration that the card is a
+        heavy win-condition core.  Its job is macro patience: remember that an
+        opponent committed a meaningful troop in the backfield so we do not
+        immediately mirror it in the other lane or waste a finite-lifetime
+        building before the troop reaches an engagement window.
+        """
+        live_ids = set(self._live_entities)
+
+        self._backfield_commitments = {
+            eid: row
+            for eid, row in self._backfield_commitments.items()
+            if eid in live_ids
+        }
+
+        for eid, ent in self._live_entities.items():
+            eid = int(eid)
+
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+
+            cid = int(ent.get('card_id', -1))
+            spec = self.bundle.card_specs.get(cid)
+
+            if spec is None or spec.kind.value != 'troop':
+                continue
+
+            cost = float(spec.elixir_cost)
+
+            if cost < BACKFIELD_COMMITMENT_MIN_COST:
+                continue
+
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+
+            depth = self._defensive_depth(ent['y'])
+
+            if (
+                eid not in self._backfield_commitments
+                and depth >= BACKFIELD_COMMITMENT_START_DEPTH
+            ):
+                x = float(ent['x'])
+
+                self._backfield_commitments[eid] = {
+                    'card_id': cid,
+                    'cost': cost,
+                    'first_seen_tick': int(
+                        self._first_seen.get(
+                            eid, self._observed_tick)),
+                    'initial_lane': (
+                        'left' if x < 9000.0 else 'right'),
+                }
+
+        active = []
+        finished = []
+
+        for eid, tracked in self._backfield_commitments.items():
+            ent = self._live_entities.get(eid)
+
+            if ent is None:
+                finished.append(eid)
+                continue
+
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                finished.append(eid)
+                continue
+
+            x = float(ent['x'])
+            depth = self._defensive_depth(ent['y'])
+
+            # At this point ordinary live-defense logic owns the unit.
+            if depth <= BACKFIELD_COMMITMENT_RELEASE_DEPTH:
+                finished.append(eid)
+                continue
+
+            active.append({
+                **tracked,
+                'entity_id': int(eid),
+                'lane': 'left' if x < 9000.0 else 'right',
+                'depth': float(depth),
+            })
+
+        for eid in finished:
+            self._backfield_commitments.pop(eid, None)
+
+        if not active:
+            return None
+
+        nearest = min(
+            active,
+            key=lambda row: (
+                row['depth'],
+                -row['cost'],
+                row['entity_id'],
+            ),
+        )
+
+        lanes = {row['lane'] for row in active}
+
+        return {
+            'lane': (
+                next(iter(lanes))
+                if len(lanes) == 1
+                else None
+            ),
+            'entity_id': nearest['entity_id'],
+            'card_id': nearest['card_id'],
+            'cost': nearest['cost'],
+            'depth': nearest['depth'],
+            'count': len(active),
+            'initial_lane': nearest['initial_lane'],
+        }
+
     def _incoming_push_context(self):
         """Track a public heavy backfield deployment before it becomes pressure.
 
@@ -1132,6 +1287,133 @@ class FeatureAdapter:
             'reserve_core_defenders': (
                 nearest['depth'] > INCOMING_PUSH_DEFENDER_RELEASE_DEPTH
             ),
+        }
+
+
+    def _cannon_prebuild_context(self, incoming_push):
+        """Decide whether Cannon may be established before final engagement.
+
+        A finite-lifetime building should not be dropped immediately after a
+        tank is played in the far back.  It also should not wait until the tank
+        is already inside pull range.
+
+        Use measured closing velocity when available.  Before a second
+        position sample exists, a conservative depth fallback opens the
+        prebuild window.
+        """
+        if (
+            incoming_push is None
+            or incoming_push.get('lane') is None
+        ):
+            return None
+
+        entity_id = incoming_push.get(
+            'core_entity_id')
+
+        ent = self._live_entities.get(
+            entity_id)
+
+        if ent is None:
+            return None
+
+        depth = float(
+            incoming_push.get(
+                'core_depth',
+                self._defensive_depth(ent['y']),
+            )
+        )
+
+        if depth <= HEAVY_DEFEND_CANNON_RELEASE_DEPTH:
+            return {
+                'allowed': True,
+                'urgent': True,
+                'reason': 'anchor_window',
+                'lead_ticks': 0.0,
+                'depth': depth,
+                'lane': incoming_push['lane'],
+            }
+
+        velocity = self._velocity.get(
+            int(entity_id))
+
+        closing_per_tick = 0.0
+
+        if velocity is not None:
+            _, vy = velocity
+
+            # Owner 0 defends low Y, so an approaching enemy has negative vy.
+            # Owner 1 defends high Y, so an approaching enemy has positive vy.
+            closing_per_tick = (
+                max(0.0, -float(vy))
+                if self.actor_owner == 0
+                else max(0.0, float(vy))
+            )
+
+        velocity_outlier = (
+            closing_per_tick
+            > CANNON_PREBUILD_MAX_REASONABLE_SPEED_PER_TICK
+        )
+
+        if velocity_outlier:
+            # Do not turn a stale-frame/telemetry jump into an emergency
+            # prebuild. Fall back to the conservative depth gate below.
+            closing_per_tick = 0.0
+
+        if closing_per_tick > 1.0:
+            remaining = max(
+                0.0,
+                depth
+                - HEAVY_DEFEND_CANNON_RELEASE_DEPTH,
+            )
+
+            lead_ticks = (
+                remaining / closing_per_tick
+            )
+
+            if (
+                lead_ticks
+                <= CANNON_PREBUILD_MAX_LEAD_TICKS
+            ):
+                return {
+                    'allowed': True,
+                    'urgent': (
+                        lead_ticks
+                        <= CANNON_PREBUILD_URGENT_LEAD_TICKS
+                    ),
+                    'reason': 'predicted_anchor_eta',
+                    'lead_ticks': float(lead_ticks),
+                    'depth': depth,
+                    'lane': incoming_push['lane'],
+                }
+
+            return {
+                'allowed': False,
+                'urgent': False,
+                'reason': 'tank_too_far',
+                'lead_ticks': float(lead_ticks),
+                'depth': depth,
+                'lane': incoming_push['lane'],
+            }
+
+        allowed = (
+            depth <= CANNON_PREBUILD_FALLBACK_DEPTH
+        )
+
+        return {
+            'allowed': bool(allowed),
+            'urgent': False,
+            'reason': (
+                'velocity_outlier_depth_fallback'
+                if velocity_outlier and allowed
+                else 'velocity_outlier_wait'
+                if velocity_outlier
+                else 'depth_fallback'
+                if allowed
+                else 'waiting_for_motion'
+            ),
+            'lead_ticks': None,
+            'depth': depth,
+            'lane': incoming_push['lane'],
         }
 
     def _attack_hold_context(self, effective_elixir, pressure=None):
@@ -1602,6 +1884,199 @@ class FeatureAdapter:
         masked[f'{metadata_prefix}_target_radius'] = float(radius)
         return masked
 
+
+    def defense_overflow_fallback(self, state, observation):
+        """Choose one already-approved formation action after a capped WAIT."""
+        mask = observation.action_mask
+        reasons = mask.reasons
+
+        if not reasons.get(
+                'defense_overflow_forced'):
+            return None
+
+        safe_slots = list(
+            reasons.get(
+                'defense_overflow_safe_slots')
+            or ()
+        )
+
+        if not safe_slots:
+            return None
+
+        mode = reasons.get(
+            'defense_overflow_mode')
+
+        priority = {}
+
+        # Formation ordering mirrors the macro intent.
+        if mode == 'backline_setup':
+            priority = {
+                MUSKETEER: 0,
+            }
+
+        elif mode == 'cannon_prebuild_urgent':
+            priority = {
+                CANNON: 0,
+                ICE_SPIRIT: 1,
+                SKELETONS: 2,
+            }
+
+        elif mode == 'cycle_then_prebuild':
+            priority = {
+                ICE_SPIRIT: 0,
+                SKELETONS: 1,
+                CANNON: 2,
+            }
+
+        elif mode == 'cannon_prebuild':
+            priority = {
+                CANNON: 0,
+            }
+
+        else:
+            priority = {
+                MUSKETEER: 0,
+                CANNON: 1,
+                ICE_GOLEM: 2,
+                ICE_SPIRIT: 3,
+                SKELETONS: 4,
+            }
+
+        candidates = []
+
+        for raw_slot in safe_slots:
+            slot = int(raw_slot)
+
+            if not (
+                0 <= slot < len(state.hand_cards)
+                and slot < len(mask.hand_slots)
+                and mask.hand_slots[slot]
+            ):
+                continue
+
+            cid = int(
+                state.hand_cards[slot])
+
+            entry = mask.placement_masks.get(
+                str(slot))
+
+            if not isinstance(entry, dict):
+                continue
+
+            cost = entry.get(
+                'effective_cost')
+
+            if not isinstance(cost, (int, float)):
+                continue
+
+            candidates.append((
+                priority.get(cid, 99),
+                slot,
+                cid,
+                float(cost),
+                entry,
+            ))
+
+        if not candidates:
+            return None
+
+        _, slot, cid, cost, entry = min(
+            candidates)
+
+        lane = (
+            reasons.get('incoming_push_lane')
+            or reasons.get('backfield_commitment_lane')
+            or reasons.get('defensive_threat_lane')
+            or reasons.get('prelock_lane')
+        )
+
+        preferred_x = (
+            3500.0
+            if lane == 'left'
+            else 14500.0
+            if lane == 'right'
+            else 9000.0
+        )
+
+        preferred_depth = (
+            5500.0
+            if cid == MUSKETEER
+            else 8000.0
+            if cid == CANNON
+            else 9000.0
+        )
+
+        subcell = (
+            entry.get('model_subcell_offset')
+            or (0.0, 0.0)
+        )
+
+        dx = float(
+            subcell[0] or 0.0)
+        dy = float(
+            subcell[1] or 0.0)
+
+        sign = (
+            1.0
+            if self.actor_owner == 0
+            else -1.0
+        )
+
+        legal = []
+
+        for gy, row in enumerate(
+                entry['row_major']):
+            for gx, allowed in enumerate(row):
+                if not allowed:
+                    continue
+
+                wx = (
+                    gx + 0.5 + sign * dx
+                ) * 1000.0
+
+                wy = (
+                    gy + 0.5 + sign * dy
+                ) * 1000.0
+
+                depth = self._defensive_depth(
+                    wy)
+
+                score = (
+                    (wx - preferred_x) ** 2
+                    + 0.4
+                    * (depth - preferred_depth) ** 2
+                )
+
+                legal.append(
+                    (score, gx, gy))
+
+        if not legal:
+            return None
+
+        _, gx, gy = min(legal)
+
+        return ActionV1(
+            owner=state.local_owner,
+            kind=ActionKind.PLAY_CARD,
+            hand_slot=slot,
+            card_id=cid,
+            target_kind=TargetKind.GRID,
+            target_grid=(gx, gy),
+            subcell_offset=(
+                sign * dx,
+                sign * dy,
+            ),
+            execute_offset_ticks=1,
+            next_decision_ticks=config.DECISION_TICKS,
+            metadata={
+                'policy_effective_cost': cost,
+                'policy_effective_form_code': int(
+                    entry.get('form_code', 0) or 0),
+                'defense_overflow_fallback': True,
+                'defense_overflow_mode': mode,
+            },
+        )
+
     def defensive_lane_conflict(self, action, state):
         """Detect an obvious cross-lane defensive placement mistake.
 
@@ -1964,42 +2439,114 @@ class FeatureAdapter:
             self._has_defensive_pressure() or prelock is not None
         )
         incoming_push = self._incoming_push_context()
+        backfield_commitment = self._backfield_commitment_context()
+
         preparing_for_push = (
             incoming_push is not None
             and not defensive_pressure
             and near_tower_pressure is None
         )
-        attack_hold = self._attack_hold_context(elixir, near_tower_pressure)
+
+        backfield_patience = (
+            backfield_commitment is not None
+            and not defensive_pressure
+            and near_tower_pressure is None
+        )
+
+        backfield_depth = (
+            float(backfield_commitment.get('depth'))
+            if backfield_commitment is not None
+            and backfield_commitment.get('depth') is not None
+            else None
+        )
+
+        backfield_lane = (
+            backfield_commitment.get('lane')
+            if backfield_commitment is not None
+            else None
+        )
+
+        attack_hold = self._attack_hold_context(
+            elixir, near_tower_pressure)
+
         counterpush = self._counterpush_context(
-            True if defensive_pressure or incoming_push is not None
-            else near_tower_pressure)
-        exact_building_cycle_window = self._exact_building_cycle_window(
-            defensive_pressure=defensive_pressure or preparing_for_push)
+            True
+            if (
+                defensive_pressure
+                or incoming_push is not None
+                or backfield_patience
+            )
+            else near_tower_pressure
+        )
+
+        preparation_pressure = (
+            defensive_pressure
+            or preparing_for_push
+            or backfield_patience
+        )
+
+        exact_building_cycle_window = (
+            self._exact_building_cycle_window(
+                defensive_pressure=preparation_pressure)
+        )
+
         building_attack_window = (
             exact_building_cycle_window
             or self._recent_building_attack_window(
-                state.tick, defensive_pressure=defensive_pressure or preparing_for_push)
+                state.tick,
+                defensive_pressure=preparation_pressure,
+            )
         )
+
         low_elixir_attack_window = self._low_elixir_attack_window(
-            elixir, opponent_elixir_bounds,
-            defensive_pressure=defensive_pressure or preparing_for_push)
+            elixir,
+            opponent_elixir_bounds,
+            defensive_pressure=preparation_pressure,
+        )
+
+        # A generic 3/4-elixir backfield troop is not enough evidence to
+        # manufacture an attack window.  A proved 5+ elixir incoming push
+        # keeps the existing opposite-lane Hog punish logic.
+        opportunity_defensive_pressure = (
+            defensive_pressure
+            or (
+                backfield_patience
+                and incoming_push is None
+            )
+        )
+
         attack_opportunity = self._attack_opportunity_context(
             elixir,
-            defensive_pressure=defensive_pressure,
+            defensive_pressure=opportunity_defensive_pressure,
             near_tower_pressure=near_tower_pressure,
             incoming_push=incoming_push,
             counterpush=counterpush,
             building_window=building_attack_window,
             low_elixir_window=low_elixir_attack_window,
         )
+
         strategy_phase = (
-            'defend' if defensive_pressure or near_tower_pressure is not None else
-            'prepare_defense' if incoming_push is not None else
-            'counterpush' if (
+            'defend'
+            if defensive_pressure or near_tower_pressure is not None
+            else 'prepare_defense'
+            if incoming_push is not None or backfield_patience
+            else 'counterpush'
+            if (
                 attack_opportunity is not None
                 and attack_opportunity.get('kind') == 'counterpush'
-            ) else
-            'neutral'
+            )
+            else 'neutral'
+        )
+
+        defense_overflow_active = (
+            float(elixir) >= DEFENSE_OVERFLOW_ELIXIR
+            and strategy_phase in ('defend', 'prepare_defense')
+        )
+
+        defense_overflow_hard_cap = (
+            defense_overflow_active
+            and float(elixir)
+                >= DEFENSE_OVERFLOW_HARD_CAP_ELIXIR
         )
         defending_incoming_push = (
             strategy_phase == 'defend'
@@ -2011,6 +2558,19 @@ class FeatureAdapter:
             if incoming_push is not None
             and incoming_push.get('core_depth') is not None
             else None
+        )
+        cannon_prebuild = (
+            self._cannon_prebuild_context(incoming_push)
+            if preparing_for_push
+            else None
+        )
+        cannon_prebuild_allowed = bool(
+            cannon_prebuild
+            and cannon_prebuild.get('allowed')
+        )
+        cannon_prebuild_urgent = bool(
+            cannon_prebuild
+            and cannon_prebuild.get('urgent')
         )
         heavy_fireball = (
             self._heavy_defense_fireball_context(incoming_push)
@@ -2064,6 +2624,24 @@ class FeatureAdapter:
             incoming_push.get('core_count') if incoming_push else 0)
         self.quality['incoming_push_evidence'] = (
             incoming_push.get('evidence') if incoming_push else None)
+        self.quality['backfield_commitment_active'] = (
+            backfield_commitment is not None)
+        self.quality['backfield_commitment_lane'] = (
+            backfield_commitment.get('lane')
+            if backfield_commitment else None)
+        self.quality['backfield_commitment_card_id'] = (
+            backfield_commitment.get('card_id')
+            if backfield_commitment else None)
+        self.quality['backfield_commitment_cost'] = (
+            backfield_commitment.get('cost')
+            if backfield_commitment else None)
+        self.quality['backfield_commitment_depth'] = (
+            backfield_commitment.get('depth')
+            if backfield_commitment else None)
+        self.quality['backfield_patience_active'] = bool(
+            backfield_patience)
+        self.quality['defense_overflow_active'] = bool(
+            defense_overflow_active)
         last_exact = self._last_opponent_exact_play
         self.quality['opponent_last_exact_play_card_id'] = (
             last_exact.get('card_id') if last_exact else None)
@@ -2178,6 +2756,15 @@ class FeatureAdapter:
             if prelock is not None and cid == HOG_RIDER:
                 slot_reasons[str(slot)] = 'strategy_prelock_defense'
                 continue
+            if (
+                defense_overflow_active
+                and strategy_phase == 'defend'
+                and cid == HOG_RIDER
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_attack_defense_overflow'
+                )
+                continue
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
                 continue
@@ -2234,9 +2821,112 @@ class FeatureAdapter:
                 continue
             if (preparing_for_push
                     and incoming_push.get('reserve_core_defenders')
-                    and cid in INCOMING_PUSH_CORE_DEFENDERS):
+                    and cid in INCOMING_PUSH_CORE_DEFENDERS
+                    and not (
+                        (
+                            cid == CANNON
+                            and cannon_prebuild_allowed
+                        )
+                        or (
+                            cid == MUSKETEER
+                            and defense_overflow_active
+                        )
+                    )):
                 slot_reasons[str(slot)] = 'strategy_reserve_incoming_push'
                 continue
+
+            # Once the old generic reserve releases, keep each defender held
+            # until its own useful engagement window.  In particular Cannon
+            # must not spend most of its lifetime waiting for a slow tank.
+            if (
+                preparing_for_push
+                and cid == CANNON
+                and not cannon_prebuild_allowed
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_cannon_for_incoming_push'
+                )
+                continue
+
+            if (
+                preparing_for_push
+                and heavy_core_depth is not None
+                and cid == MUSKETEER
+                and heavy_core_depth
+                    > HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH
+                and not defense_overflow_active
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_musketeer_for_incoming_push'
+                )
+                continue
+
+            if (
+                preparing_for_push
+                and heavy_core_depth is not None
+                and cid == ICE_GOLEM
+                and heavy_core_depth
+                    > HEAVY_DEFEND_BODY_RELEASE_DEPTH
+                and not defense_overflow_hard_cap
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_ice_golem_for_incoming_push'
+                )
+                continue
+
+            # Medium backfield commitments get the same patience principle
+            # without pretending they are heavy push cores.
+            if (
+                backfield_patience
+                and incoming_push is None
+                and backfield_depth is not None
+                and cid == CANNON
+                and backfield_depth
+                    > BACKFIELD_CANNON_RELEASE_DEPTH
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_backfield_cannon'
+                )
+                continue
+
+            if (
+                backfield_patience
+                and incoming_push is None
+                and backfield_depth is not None
+                and cid == MUSKETEER
+                and backfield_depth
+                    > BACKFIELD_MUSKETEER_RELEASE_DEPTH
+                and not defense_overflow_active
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_backfield_musketeer'
+                )
+                continue
+
+            if (
+                backfield_patience
+                and incoming_push is None
+                and backfield_depth is not None
+                and cid == ICE_GOLEM
+                and backfield_depth
+                    > BACKFIELD_ICE_GOLEM_RELEASE_DEPTH
+                and not defense_overflow_hard_cap
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_backfield_ice_golem'
+                )
+                continue
+
+            if (
+                backfield_patience
+                and incoming_push is None
+                and cid == FIREBALL
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_backfield_spell'
+                )
+                continue
+
             if neutral_patience and cid in NEUTRAL_PATIENCE_CARDS:
                 if not (cid == HOG_RIDER and hog_opportunity_release):
                     slot_reasons[str(slot)] = 'strategy_neutral_patience'
@@ -2249,6 +2939,16 @@ class FeatureAdapter:
                     and cid in DEFENSIVE_LANE_CARDS):
                 entry = self._mask_to_defensive_lane(
                     entry, prelock_lane)
+            elif (
+                    backfield_patience
+                    and incoming_push is None
+                    and backfield_lane is not None
+                    and cid in DEFENSIVE_LANE_CARDS):
+                # Never answer a visible backfield commitment by sinking a
+                # defensive body in the opposite lane.  Reuse the proved role
+                # depth bands for staged same-lane preparation.
+                entry = self._mask_to_heavy_defense_role(
+                    entry, cid, backfield_lane)
             elif (defending_incoming_push
                     and cid in (INCOMING_PUSH_CORE_DEFENDERS | frozenset((ICE_GOLEM,)))):
                 entry = self._mask_to_heavy_defense_role(
@@ -2262,6 +2962,20 @@ class FeatureAdapter:
             elif defensive_lane_gate is not None and cid in DEFENSIVE_LANE_CARDS:
                 entry = self._mask_to_defensive_lane(
                     entry, defensive_lane_gate['threat_lane'])
+            elif (
+                    preparing_for_push
+                    and cannon_prebuild_allowed
+                    and cid == CANNON
+                    and incoming_push.get('lane') is not None):
+                entry = self._mask_to_heavy_defense_role(
+                    entry, cid, incoming_push['lane'])
+                entry['cannon_prebuild'] = True
+                entry['cannon_prebuild_reason'] = (
+                    cannon_prebuild.get('reason')
+                    if cannon_prebuild else None)
+                entry['cannon_prebuild_lead_ticks'] = (
+                    cannon_prebuild.get('lead_ticks')
+                    if cannon_prebuild else None)
             elif (preparing_for_push
                     and incoming_push.get('lane') is not None
                     and cid in DEFENSIVE_LANE_CARDS):
@@ -2295,6 +3009,154 @@ class FeatureAdapter:
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
                 masks[str(slot)] = entry
+
+        # WAIT must stay legal in V4. These slots define the structural
+        # spend used only when a near-cap defensive WAIT would waste elixir.
+        wait_allowed = True
+        defense_overflow_forced = False
+        defense_overflow_safe_slots = []
+        defense_overflow_mode = None
+
+        if defense_overflow_active:
+            if strategy_phase == 'prepare_defense':
+                # Phase 1: establish the backline defender that will actually
+                # belong to the coming defense.
+                musketeer_slots = [
+                    slot
+                    for slot, cid in slots.items()
+                    if playable[slot]
+                    and cid == MUSKETEER
+                ]
+
+                if musketeer_slots:
+                    defense_overflow_safe_slots = sorted(
+                        musketeer_slots)
+                    defense_overflow_mode = (
+                        'backline_setup'
+                    )
+
+                else:
+                    # Phase 2: after the backline card has left the hand /
+                    # become blocked, use the tank's walking time to cycle.
+                    cycle_slots = [
+                        slot
+                        for slot, cid in slots.items()
+                        if playable[slot]
+                        and cid
+                            in DEFENSE_OVERFLOW_SAFE_CYCLE_CARDS
+                    ]
+
+                    cannon_slots = [
+                        slot
+                        for slot, cid in slots.items()
+                        if playable[slot]
+                        and cid == CANNON
+                        and cannon_prebuild_allowed
+                    ]
+
+                    # If the tank is already close enough that the Cannon
+                    # anchor should be established now, prefer it. Otherwise
+                    # allow the cheap cycle first to work toward a second
+                    # rotation while the tank continues walking.
+                    if (
+                        cannon_slots
+                        and cannon_prebuild_urgent
+                    ):
+                        defense_overflow_safe_slots = sorted(
+                            cannon_slots)
+                        defense_overflow_mode = (
+                            'cannon_prebuild_urgent'
+                        )
+
+                    elif cycle_slots:
+                        defense_overflow_safe_slots = sorted(
+                            cycle_slots
+                            + cannon_slots
+                        )
+                        defense_overflow_mode = (
+                            'cycle_then_prebuild'
+                        )
+
+                    elif cannon_slots:
+                        defense_overflow_safe_slots = sorted(
+                            cannon_slots)
+                        defense_overflow_mode = (
+                            'cannon_prebuild'
+                        )
+
+                    elif (
+                        incoming_push is not None
+                        and hog_opportunity_release
+                    ):
+                        defense_overflow_safe_slots = sorted(
+                            slot
+                            for slot, cid in slots.items()
+                            if playable[slot]
+                            and cid == HOG_RIDER
+                        )
+                        defense_overflow_mode = (
+                            'heavy_commit_hog_punish'
+                        )
+
+                    elif defense_overflow_hard_cap:
+                        body_slots = [
+                            slot
+                            for slot, cid in slots.items()
+                            if playable[slot]
+                            and cid == ICE_GOLEM
+                        ]
+
+                        if body_slots:
+                            defense_overflow_safe_slots = sorted(
+                                body_slots)
+                            defense_overflow_mode = (
+                                'ice_golem_body'
+                            )
+
+                if defense_overflow_safe_slots:
+                    safe = set(
+                        defense_overflow_safe_slots)
+
+                    for slot in range(4):
+                        if (
+                            not playable[slot]
+                            or slot in safe
+                        ):
+                            continue
+
+                        playable[slot] = False
+                        masks.pop(str(slot), None)
+                        slot_reasons[str(slot)] = (
+                            'strategy_defense_overflow_formation'
+                        )
+
+                    defense_overflow_forced = True
+
+            elif strategy_phase == 'defend':
+                legal = [
+                    slot
+                    for slot in range(4)
+                    if playable[slot]
+                    and int(slots.get(slot, -1))
+                        != HOG_RIDER
+                ]
+
+                if legal:
+                    defense_overflow_safe_slots = sorted(
+                        legal)
+                    defense_overflow_mode = (
+                        'live_defense'
+                    )
+                    defense_overflow_forced = True
+
+        self.quality['defense_overflow_forced'] = bool(
+            defense_overflow_forced)
+        self.quality['defense_overflow_safe_slots'] = list(
+            defense_overflow_safe_slots)
+        self.quality['defense_overflow_mode'] = (
+            defense_overflow_mode)
+
+
         ready = ready_abilities(player, state.entities, self.bundle, elixir, blocked_abilities) if self.hero_musketeer and self.hero_skill_ready else ()
         source_ids = {a.source_entity for a in ready}
         # The validated controller binds the actual carrier, not every unit
@@ -2344,6 +3206,42 @@ class FeatureAdapter:
                      'attack_hold_enemy_id': (
                          attack_hold['enemy_id'] if attack_hold else None),
                      'strategy_phase': strategy_phase,
+                     'backfield_commitment_active': (
+                         backfield_commitment is not None),
+                     'backfield_commitment_lane': (
+                         backfield_commitment.get('lane')
+                         if backfield_commitment else None),
+                     'backfield_commitment_card_id': (
+                         backfield_commitment.get('card_id')
+                         if backfield_commitment else None),
+                     'backfield_commitment_cost': (
+                         backfield_commitment.get('cost')
+                         if backfield_commitment else None),
+                     'backfield_commitment_depth': (
+                         backfield_commitment.get('depth')
+                         if backfield_commitment else None),
+                     'backfield_patience_active': bool(
+                         backfield_patience),
+                     'defense_overflow_active': bool(
+                         defense_overflow_active),
+                     'defense_overflow_hard_cap': bool(
+                         defense_overflow_hard_cap),
+                     'defense_overflow_forced': bool(
+                         defense_overflow_forced),
+                     'defense_overflow_safe_slots': list(
+                         defense_overflow_safe_slots),
+                     'defense_overflow_mode': (
+                         defense_overflow_mode),
+                     'cannon_prebuild_allowed': bool(
+                         cannon_prebuild_allowed),
+                     'cannon_prebuild_urgent': bool(
+                         cannon_prebuild_urgent),
+                     'cannon_prebuild_reason': (
+                         cannon_prebuild.get('reason')
+                         if cannon_prebuild else None),
+                     'cannon_prebuild_lead_ticks': (
+                         cannon_prebuild.get('lead_ticks')
+                         if cannon_prebuild else None),
                      'counterpush_lane': (
                          counterpush['lane'] if counterpush else None),
                      'counterpush_support_entity_id': (

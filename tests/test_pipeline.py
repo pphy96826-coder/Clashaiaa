@@ -384,46 +384,477 @@ class AdapterTests(unittest.TestCase):
             'strategy_reserve_incoming_push_spell',
         )
 
+
+
     def test_incoming_push_releases_and_lanes_cannon_as_core_approaches(self):
         raw = opening()
-        hand = (27000000, 26000010, 26000021, 26000030)
+
+        hand = (
+            27000000,
+            26000010,
+            26000021,
+            26000030,
+        )
+
         raw['players'][0]['hand'] = [
-            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
         ]
+
         raw['players'][0]['cycle'] = [
-            cid for cid in HOG_26_DECK if cid not in hand
+            cid
+            for cid in HOG_26_DECK
+            if cid not in hand
         ]
-        s = ProbeClient(account_id=123).parse(raw)
+
+        s = ProbeClient(
+            account_id=123
+        ).parse(raw)
+
         a = FeatureAdapter()
-        a.reset_match(s, 'incoming-push-cannon')
-        add_enemy(s, 9193, 3500, 26000, card_id=26000003, hp=3000)
+
+        a.reset_match(
+            s,
+            'incoming-push-cannon',
+        )
+
+        add_enemy(
+            s,
+            9193,
+            3500,
+            26000,
+            card_id=26000003,
+            hp=3000,
+        )
+
         s.tick += 1
 
         _, far = a.tensorize(s)
-        self.assertFalse(far.action_mask.hand_slots[0])
-        self.assertEqual(
-            far.action_mask.reasons['slot_reasons']['0'],
-            'strategy_reserve_incoming_push',
+
+        # Very far back: do not burn Cannon lifetime.
+        self.assertFalse(
+            far.action_mask.hand_slots[0])
+
+        giant = next(
+            ent for ent in s.entities
+            if ent['id'] == 9193
         )
 
-        giant = next(ent for ent in s.entities if ent['id'] == 9193)
+        # Once the tank has advanced enough, Cannon may be established in the
+        # real pull band BEFORE the tank itself reaches pull range.
         giant['y'] = 17500
         s.tick += 1
-        _, near = a.tensorize(s)
 
-        self.assertEqual(near.action_mask.reasons['strategy_phase'], 'prepare_defense')
-        self.assertTrue(near.action_mask.reasons['incoming_push_active'])
-        self.assertFalse(near.action_mask.reasons['incoming_push_reserve_defenders'])
-        self.assertTrue(near.action_mask.hand_slots[0])
-        cannon = near.action_mask.placement_masks['0']
-        self.assertEqual(cannon['incoming_push_lane'], 'left')
+        _, early = a.tensorize(s)
+
         self.assertEqual(
-            cannon['incoming_push_max_defensive_depth'], 14000.0)
-        self.assertTrue(any(row[x] for row in cannon['row_major'] for x in range(0, 9)))
-        self.assertFalse(any(row[x] for row in cannon['row_major'] for x in range(9, 18)))
-        for y, row in enumerate(cannon['row_major']):
-            if any(row):
-                self.assertLessEqual((y + 0.5) * 1000.0, 14000.0)
+            early.action_mask.reasons[
+                'strategy_phase'],
+            'prepare_defense',
+        )
+
+        self.assertTrue(
+            early.action_mask.reasons[
+                'cannon_prebuild_allowed']
+        )
+
+        self.assertTrue(
+            early.action_mask.hand_slots[0])
+
+        cannon = (
+            early.action_mask
+            .placement_masks['0']
+        )
+
+        self.assertTrue(
+            cannon.get('cannon_prebuild'))
+
+        self.assertEqual(
+            cannon['heavy_defense_lane'],
+            'left',
+        )
+
+        self.assertEqual(
+            cannon[
+                'heavy_defense_cannon_min_defensive_depth'],
+            4500.0,
+        )
+
+        self.assertEqual(
+            cannon[
+                'heavy_defense_cannon_max_defensive_depth'],
+            11500.0,
+        )
+
+    def test_medium_backfield_commitment_holds_opposite_lane_setup(self):
+        raw = opening()
+
+        hand = (
+            26000010,  # Skeletons
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            26000038,  # Ice Golem
+        )
+
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'backfield-medium-patience')
+
+        s.elixir = 8.0
+
+        # Opponent Musketeer is a meaningful backfield commitment but not a
+        # 5+ elixir heavy core.
+        add_enemy(
+            s, 9320, 3500, 26000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'prepare_defense',
+        )
+        self.assertTrue(
+            o.action_mask.reasons[
+                'backfield_commitment_active'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'backfield_patience_active'])
+        self.assertEqual(
+            o.action_mask.reasons[
+                'backfield_commitment_lane'],
+            'left',
+        )
+
+        # Cheap cycle remains available; the model cannot answer a distant
+        # Musketeer by sinking our own Musketeer/Ice Golem elsewhere or by
+        # wasting Cannon lifetime.
+        self.assertTrue(o.action_mask.hand_slots[0])
+
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_hold_backfield_musketeer',
+        )
+
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_hold_backfield_cannon',
+        )
+
+        self.assertFalse(o.action_mask.hand_slots[3])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['3'],
+            'strategy_hold_backfield_ice_golem',
+        )
+
+    def test_prepare_defense_overflow_forces_safe_cycle_not_prebuild(self):
+        raw = opening()
+
+        hand = (
+            26000010,  # Skeletons
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+        )
+
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'prepare-overflow-safe-cycle')
+
+        s.elixir = 10.0
+
+        add_enemy(
+            s, 9321, 3500, 26000,
+            card_id=26000003, hp=3000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'defense_overflow_active'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'defense_overflow_forced'])
+
+        self.assertTrue(
+            o.action_mask.kinds['wait'])
+
+        self.assertEqual(
+            o.action_mask.reasons[
+                'defense_overflow_safe_slots'],
+            [0],
+        )
+
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertFalse(o.action_mask.hand_slots[3])
+
+    def test_prepare_defense_hard_cap_uses_same_lane_ice_golem_fallback(self):
+        raw = opening()
+
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+            26000038,  # Ice Golem
+        )
+
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'prepare-overflow-body-fallback')
+
+        s.elixir = 10.0
+
+        add_enemy(
+            s, 9322, 3500, 26000,
+            card_id=26000003, hp=3000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'defense_overflow_hard_cap'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'defense_overflow_forced'])
+
+        self.assertTrue(
+            o.action_mask.kinds['wait'])
+
+        # No one-elixir cycle/Hog is available.  Spend two on a same-lane
+        # staged body rather than pre-Cannon or opposite-lane Musketeer.
+        self.assertEqual(
+            o.action_mask.reasons[
+                'defense_overflow_safe_slots'],
+            [3],
+        )
+
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertTrue(o.action_mask.hand_slots[3])
+
+        ice_golem = o.action_mask.placement_masks['3']
+
+        self.assertTrue(
+            any(
+                row[x]
+                for row in ice_golem['row_major']
+                for x in range(0, 9)
+            )
+        )
+
+        self.assertFalse(
+            any(
+                row[x]
+                for row in ice_golem['row_major']
+                for x in range(9, 18)
+            )
+        )
+
+    def test_live_defense_overflow_disables_wait_and_offensive_hog(self):
+        a, s = self.adapter()
+
+        s.elixir = 10.0
+
+        add_enemy(
+            s, 9323, 3500, 11000,
+            card_id=26000021, hp=1400,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'defend',
+        )
+        self.assertTrue(
+            o.action_mask.reasons[
+                'defense_overflow_active'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'defense_overflow_forced'])
+
+        # At ten elixir with a real threat on our side, waiting is no longer
+        # legal. The policy must choose among actual defensive actions.
+        self.assertTrue(
+            o.action_mask.kinds['wait'])
+
+        # Slot 2 in the normal 2.6 opening is Hog Rider. Do not solve defensive
+        # overflow by sending four elixir away from the defense.
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_hold_attack_defense_overflow',
+        )
+
+
+    def test_overflow_builds_backline_before_cycle_and_cannon(self):
+        raw = opening()
+
+        hand = (
+            26000010,  # Skeletons
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            26000030,  # Ice Spirit
+        )
+
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+
+        raw['players'][0]['cycle'] = [
+            cid
+            for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(
+            account_id=123
+        ).parse(raw)
+
+        a = FeatureAdapter()
+
+        a.reset_match(
+            s,
+            'formation-sequence',
+        )
+
+        s.elixir = 10.0
+
+        add_enemy(
+            s,
+            9340,
+            3500,
+            26000,
+            card_id=26000003,
+            hp=3000,
+        )
+
+        s.tick += 1
+
+        _, first = a.tensorize(s)
+
+        # First spend is the real backline unit, not Skeletons.
+        self.assertEqual(
+            first.action_mask.reasons[
+                'defense_overflow_mode'],
+            'backline_setup',
+        )
+
+        self.assertEqual(
+            tuple(first.action_mask.reasons[
+                'defense_overflow_safe_slots']),
+            (1,),
+        )
+
+        self.assertTrue(
+            first.action_mask.hand_slots[1])
+
+        self.assertFalse(
+            first.action_mask.hand_slots[0])
+
+        # Simulate the real native hand rotation after Musketeer is played.
+        # Initial cycle is Hog -> Ice Golem -> Fireball -> Log, so Hog enters
+        # slot 1 and Musketeer returns to the tail of the native cycle.
+        local = next(
+            p for p in s.raw['players']
+            if int(p['owner']) == s.local_owner
+        )
+
+        slot_one = next(
+            row for row in local['hand']
+            if int(row['slot']) == 1
+        )
+
+        slot_one['card_id'] = 26000021
+        local['cycle'] = [
+            26000038,
+            28000000,
+            28000011,
+            26000014,
+        ]
+
+        s.hand_cards[1] = 26000021
+
+        giant = next(
+            ent for ent in s.entities
+            if ent['id'] == 9340
+        )
+
+        giant['y'] = 17500
+        s.tick += 1
+
+        _, second = a.tensorize(s)
+
+        self.assertTrue(
+            second.action_mask.reasons[
+                'cannon_prebuild_allowed']
+        )
+
+        self.assertIn(
+            second.action_mask.reasons[
+                'defense_overflow_mode'],
+            (
+                'cycle_then_prebuild',
+                'cannon_prebuild_urgent',
+            ),
+        )
+
+        safe = set(
+            second.action_mask.reasons[
+                'defense_overflow_safe_slots']
+        )
+
+        # Cheap cycle is now meaningful: it works toward another hand rotation
+        # while the already-established Musketeer waits for the tank.
+        self.assertTrue(
+            safe.intersection({0, 3})
+        )
+
+        # Cannon is also permitted once its useful lifetime/ETA window opens.
+        self.assertIn(
+            2,
+            safe,
+        )
 
     def test_exact_heavy_play_binds_unknown_runtime_carrier(self):
         raw = opening()

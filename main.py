@@ -898,6 +898,44 @@ class CustomCardDeployAgent:
                             self.adapter,
                             emergency=prelock_fast_path,
                         )
+                        overflow_fallback = None
+
+                        if (
+                            all(
+                                action.kind.value == 'wait'
+                                for action in decoded.actions
+                            )
+                            and obs.action_mask.reasons.get(
+                                'defense_overflow_forced')
+                        ):
+                            overflow_fallback = (
+                                self.adapter.defense_overflow_fallback(
+                                    state, obs)
+                            )
+
+                        if overflow_fallback is not None:
+                            decoded = type(decoded)(
+                                owner=decoded.owner,
+                                actions=(overflow_fallback,),
+                            )
+
+                            self.log(
+                                'defense_overflow_fallback',
+                                tick=state.tick,
+                                elixir=state.elixir,
+                                slot=overflow_fallback.hand_slot,
+                                card=overflow_fallback.card_id,
+                                target_grid=overflow_fallback.target_grid,
+                                mode=overflow_fallback.metadata.get(
+                                    'defense_overflow_mode'),
+                                safe_slots=obs.action_mask.reasons.get(
+                                    'defense_overflow_safe_slots'),
+                                cannon_prebuild_lead_ticks=(
+                                    obs.action_mask.reasons.get(
+                                        'cannon_prebuild_lead_ticks')
+                                ),
+                            )
+
                         adjusted = []
                         for action in decoded.actions:
                             # A valid mirror already contains the target at
