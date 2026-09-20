@@ -2854,9 +2854,26 @@ class FeatureAdapter:
             else {'card_id': None, 'stage': None, 'emergency': False}
         )
         heavy_priority_card = heavy_priority.get('card_id')
+        neutral_patience_safe_slots = [
+            slot
+            for slot, cid in slots.items()
+            if (
+                int(cid) not in NEUTRAL_PATIENCE_CARDS
+                and int(slot) not in {int(v) for v in blocked_slots}
+                and self.bundle.card_specs.get(int(cid)) is not None
+                and float(self.bundle.card_specs[int(cid)].elixir_cost)
+                    <= float(elixir)
+            )
+        ]
+        neutral_patience_relaxed_no_cycle = bool(
+            strategy_phase == 'neutral'
+            and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
+            and not neutral_patience_safe_slots
+        )
         neutral_patience = (
             strategy_phase == 'neutral'
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
+            and bool(neutral_patience_safe_slots)
         )
         # Backward-compatible attack-window diagnostics remain limited to the
         # building/low-elixir signals; the unified context also records
@@ -2992,6 +3009,8 @@ class FeatureAdapter:
             if preparing_for_push else None
         )
         self.quality['neutral_patience_active'] = neutral_patience
+        self.quality['neutral_patience_relaxed_no_cycle'] = bool(
+            neutral_patience_relaxed_no_cycle)
         self.quality['attack_opportunity_active'] = attack_opportunity is not None
         self.quality['attack_opportunity_kind'] = (
             attack_opportunity.get('kind') if attack_opportunity else None)
@@ -3642,6 +3661,8 @@ class FeatureAdapter:
                          INCOMING_PUSH_DEFENSIVE_PLACEMENT_MAX_DEPTH
                          if preparing_for_push else None),
                      'neutral_patience_active': neutral_patience,
+                     'neutral_patience_relaxed_no_cycle': bool(
+                         neutral_patience_relaxed_no_cycle),
                      'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR,
                      'attack_opportunity_active': attack_opportunity is not None,
                      'attack_opportunity_kind': (
