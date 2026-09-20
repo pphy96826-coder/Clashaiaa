@@ -1,0 +1,8 @@
+{
+  "game_sha256": "110aa2b5cac391c498645e072b0d88729428c2c2845e7e2737ca8ee979059783",
+  "path": "artifacts/stable/libscid_sdk.so",
+  "profile": "stable",
+  "schema": "royaleharness.stable-probe.v1",
+  "sha256": "9d1c8d79712c7116e27c324dd9bcbd85d6be07923e7c8b989c61bee57cd095b0",
+  "validation": "previously_live_validated_binary"
+}

@@ -21,6 +21,20 @@
 
 发行包包含本项目源码与稳定探针，不包含模型权重、上游目录资源、游戏 APK 或原始 SDK。
 
+
+> **Stable Probe 说明**
+>
+> 正式 Stable Probe 只有一个定义：`probe/stable_probe.json`。
+> 当前验证过的文件是
+> `probe/artifacts/stable/libscid_sdk.so`，SHA-256 为
+> `9d1c8d79712c7116e27c324dd9bcbd85d6be07923e7c8b989c61bee57cd095b0`。
+> `stable-candidate` 与历史 `stable-retry` 都不是 `v0.1.0-preview`
+> 的正式 Stable。不要通过重命名候选文件或修改哈希来绕过检查。
+>
+> GitHub 源码 checkout 如果没有预编译 Stable `.so`，不能直接执行默认 Probe
+> 安装；请使用包含该验证二进制的正式发布包，或由维护者恢复完全相同哈希的 Stable
+> 二进制。重新构建只生成 candidate，除非结果与已验证 Stable 逐字节一致，否则不能晋升。
+
 ## 快速开始
 
 以下命令在**发布目录**中执行。目录名称可自定；压缩包内目前保留

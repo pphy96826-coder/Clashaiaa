@@ -81,6 +81,95 @@ class ReleaseInstallTests(unittest.TestCase):
         self.serial.start()
         self.addCleanup(self.serial.stop)
 
+
+    def test_release_stable_probe_contract_has_one_source_of_truth(self):
+        root = Path(installer.__file__).resolve().parents[1]
+
+        stable = json.loads(
+            (root / 'probe/stable_probe.json').read_text(
+                encoding='utf-8')
+        )
+
+        release_validation = json.loads(
+            (root / 'release-validation.json').read_text(
+                encoding='utf-8')
+        )
+
+        sums = json.loads(
+            (root / 'SHA256SUMS.json').read_text(
+                encoding='utf-8')
+        )
+
+        stable_release_path = (
+            'probe/' + stable['path']
+        )
+
+        self.assertEqual(
+            stable['schema'],
+            'royaleharness.stable-probe.v1',
+        )
+        self.assertEqual(
+            stable['profile'],
+            'stable',
+        )
+        self.assertEqual(
+            stable['validation'],
+            'previously_live_validated_binary',
+        )
+
+        self.assertEqual(
+            installer.PROBE,
+            root / 'probe' / stable['path'],
+        )
+        self.assertEqual(
+            installer.PROBE_SHA,
+            stable['sha256'],
+        )
+        self.assertEqual(
+            installer.GAME_SHA,
+            stable['game_sha256'],
+        )
+
+        self.assertEqual(
+            release_validation['native']['sha256'],
+            stable['sha256'],
+        )
+        self.assertEqual(
+            release_validation['game_sha256'],
+            stable['game_sha256'],
+        )
+
+        self.assertEqual(
+            sums[stable_release_path],
+            stable['sha256'],
+        )
+
+        installer_text = (
+            root / 'tools/install_probe.py'
+        ).read_text(encoding='utf-8')
+
+        powershell_text = (
+            root / 'probe/probe_artifacts.ps1'
+        ).read_text(encoding='utf-8')
+
+        # The historical name may legitimately appear in an error message
+        # warning users not to promote a retry/candidate artifact. What must
+        # never return is the old default binary path or its old pinned hash.
+        self.assertNotIn(
+            'probe/artifacts/candidates/stable-retry/libscid_sdk.so',
+            installer_text,
+        )
+
+        self.assertNotIn(
+            '91f3719b4bd4d5e9f0f034fbdd823fb3b0676c52e88f6f621ed416cf763114c4',
+            installer_text,
+        )
+
+        self.assertIn(
+            'stable_probe.json',
+            powershell_text,
+        )
+
     def test_fresh_install_preserves_real_sdk_and_restore_uses_original(self):
         installer.install(self.adb)
         real = self.adb.directory + '/libscid_sdk_real.so'
@@ -142,6 +231,7 @@ class ReleaseInstallTests(unittest.TestCase):
             return run([sys.executable, '-c',
                 "import sys;sys.stdout.buffer.write(bytes.fromhex('e8bf9ee68ea5e68890e58a9f20ff0a'))"], **kwargs)
         with patch.object(installer.config, 'ADB_PATH', Path(sys.executable)), \
+             patch.object(installer.config, 'AUTO_DISCOVER_ADB', False), \
              patch.object(installer.subprocess, 'run', side_effect=child_process):
             self.assertEqual(installer.Adb().call('logcat'), '连接成功 \ufffd')
 

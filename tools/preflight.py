@@ -6,7 +6,10 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
-from tools.install_probe import Adb, GAME_SHA, PROBE, PROBE_SHA, digest, game_directory
+from tools.install_probe import (
+    Adb, GAME_SHA, PROBE, PROBE_SHA, digest, game_directory,
+    verify_pinned_probe,
+)
 
 
 def main():
@@ -30,7 +33,14 @@ def main():
     check('python', lambda: require(sys.version_info[:2] == (3, 12), 'Tested Python version is 3.12'))
     check('adb', lambda: require(config.ADB_PATH.is_file() and bool(config.ADB_SERIAL), 'Set adb_path and adb_serial'))
     check('account', lambda: require(config.LOCAL_ACCOUNT_ID is not None, 'Use tools/inspect_players.py in a manual battle'))
-    check('probe', lambda: require(digest(PROBE) == PROBE_SHA, 'Stable probe checksum mismatch'))
+    def stable_probe():
+        sha = verify_pinned_probe()
+        try:
+            location = PROBE.relative_to(config.BASE_DIR)
+        except ValueError:
+            location = PROBE
+        return f'{location} sha256={sha}'
+    check('probe', stable_probe)
     def upstream():
         manifest = json.loads((config.BASE_DIR / 'upstream.lock.json').read_text(encoding='utf-8'))
         bad = []
