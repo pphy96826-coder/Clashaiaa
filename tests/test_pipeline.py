@@ -653,6 +653,11 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(
             o.action_mask.reasons[
                 'defense_overflow_forced'])
+        self.assertEqual(
+            o.action_mask.reasons[
+                'defense_overflow_mode'],
+            'ice_golem_body',
+        )
 
         self.assertTrue(
             o.action_mask.kinds['wait'])

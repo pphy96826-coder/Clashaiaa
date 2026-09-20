@@ -3250,34 +3250,38 @@ class FeatureAdapter:
                             'cannon_prebuild'
                         )
 
-                    elif (
-                        incoming_push is not None
-                        and hog_opportunity_release
-                    ):
-                        defense_overflow_safe_slots = sorted(
+                    else:
+                        hog_slots = sorted(
                             slot
                             for slot, cid in slots.items()
                             if playable[slot]
                             and cid == HOG_RIDER
                         )
-                        defense_overflow_mode = (
-                            'heavy_commit_hog_punish'
-                        )
 
-                    elif defense_overflow_hard_cap:
-                        body_slots = [
-                            slot
-                            for slot, cid in slots.items()
-                            if playable[slot]
-                            and cid == ICE_GOLEM
-                        ]
-
-                        if body_slots:
-                            defense_overflow_safe_slots = sorted(
-                                body_slots)
+                        if (
+                            incoming_push is not None
+                            and hog_opportunity_release
+                            and hog_slots
+                        ):
+                            defense_overflow_safe_slots = hog_slots
                             defense_overflow_mode = (
-                                'ice_golem_body'
+                                'heavy_commit_hog_punish'
                             )
+
+                        elif defense_overflow_hard_cap:
+                            body_slots = [
+                                slot
+                                for slot, cid in slots.items()
+                                if playable[slot]
+                                and cid == ICE_GOLEM
+                            ]
+
+                            if body_slots:
+                                defense_overflow_safe_slots = sorted(
+                                    body_slots)
+                                defense_overflow_mode = (
+                                    'ice_golem_body'
+                                )
 
                 if defense_overflow_safe_slots:
                     safe = set(
