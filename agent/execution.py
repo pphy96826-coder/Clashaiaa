@@ -785,7 +785,11 @@ class ActionExecutor:
 
             budget = self._defense_budget_context(action, state)
             if budget is not None:
-                if budget['committed_defense'] < budget['budget_limit']:
+                projected_defense = (
+                    budget['committed_defense']
+                    + budget['candidate_cost']
+                )
+                if projected_defense <= budget['budget_limit']:
                     self.log(
                         'threat_reservation_budget_released',
                         command_seq=reservation.command_seq,
@@ -796,6 +800,8 @@ class ActionExecutor:
                             budget['committed_defense'], 2),
                         candidate_cost=round(
                             budget['candidate_cost'], 2),
+                        projected_defense=round(
+                            projected_defense, 2),
                         budget_limit=round(budget['budget_limit'], 2),
                         remaining_before_action=round(
                             budget['remaining_before_action'], 2),
@@ -812,6 +818,8 @@ class ActionExecutor:
                         budget['committed_defense'], 2),
                     candidate_cost=round(
                         budget['candidate_cost'], 2),
+                    projected_defense=round(
+                        projected_defense, 2),
                     budget_limit=round(budget['budget_limit'], 2),
                 )
                 return reservation, matched_ids
