@@ -879,7 +879,7 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertEqual(
             o.action_mask.reasons['defense_overflow_safe_slots'],
-            (0,),
+            (0, 2),
         )
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertTrue(o.action_mask.hand_slots[1])
