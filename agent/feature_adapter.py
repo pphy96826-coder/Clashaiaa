@@ -3483,27 +3483,10 @@ class FeatureAdapter:
 
 
                 if defense_overflow_safe_slots:
-                    # Generic backfield patience only needs a WAIT fallback;
-                    # it must not erase otherwise legal model choices. A
-                    # tracked heavy push still uses the stricter formation
-                    # mask because those resources are purpose-reserved.
-                    if incoming_push is not None:
-                        safe = set(
-                            defense_overflow_safe_slots)
-
-                        for slot in range(4):
-                            if (
-                                not playable[slot]
-                                or slot in safe
-                            ):
-                                continue
-
-                            playable[slot] = False
-                            masks.pop(str(slot), None)
-                            slot_reasons[str(slot)] = (
-                                'strategy_defense_overflow_formation'
-                            )
-
+                    # Overflow is a WAIT fallback, not a second policy. Keep
+                    # every action already permitted by the real strategic
+                    # holds/release windows and only use safe_slots if the
+                    # model itself chooses to wait at the cap.
                     defense_overflow_forced = True
 
             elif strategy_phase == 'defend':

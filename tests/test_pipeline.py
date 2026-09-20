@@ -714,6 +714,29 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(o.action_mask.hand_slots[2])
         self.assertFalse(o.action_mask.hand_slots[3])
 
+    def test_heavy_prepare_overflow_fallback_does_not_mask_hog_choice(self):
+        a, s = self.adapter()
+        s.elixir = 10.0
+        add_enemy(
+            s, 9338, 3500, 26000,
+            card_id=26000003, hp=3000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'prepare_defense',
+        )
+        self.assertTrue(
+            o.action_mask.reasons['defense_overflow_forced'])
+        self.assertTrue(o.action_mask.hand_slots[2])
+
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertNotEqual(fallback.card_id, 26000021)
+
     def test_backfield_overflow_fallback_does_not_mask_model_choices(self):
         raw = opening()
         hand = (
@@ -849,7 +872,13 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertFalse(o.action_mask.hand_slots[1])
         self.assertFalse(o.action_mask.hand_slots[2])
-        self.assertFalse(o.action_mask.hand_slots[3])
+        # Log is not part of the structural fallback, but remains a legal
+        # model choice because overflow no longer rewrites the whole mask.
+        self.assertTrue(o.action_mask.hand_slots[3])
+
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000010)
 
     def test_prepare_defense_hard_cap_keeps_ice_golem_until_release_depth(self):
         raw = opening()
@@ -1301,8 +1330,14 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(
             first.action_mask.hand_slots[1])
 
-        self.assertFalse(
+        self.assertTrue(
             first.action_mask.hand_slots[0])
+        self.assertTrue(
+            first.action_mask.hand_slots[3])
+
+        fallback = a.defense_overflow_fallback(s, first)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000014)
 
         # Simulate the real native hand rotation after Musketeer is played.
         # Initial cycle is Hog -> Ice Golem -> Fireball -> Log, so Hog enters
