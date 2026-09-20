@@ -168,11 +168,46 @@ class CustomCardDeployAgent:
     def _validate_action(self, action, state):
         if state.native_finalized:
             return False
+        blocked_slots = set(
+            self.executor.blocked_slots(state)
+        )
+        blocked_abilities = set(
+            self.executor.blocked_abilities()
+        )
+        reserved_elixir = float(
+            self.executor.reserved_elixir
+        )
+
+        # The action being revalidated is already present in executor.pending.
+        # Do not let its own queued reservation make it fail its own live
+        # legality check.  Keep every *other* unresolved action/guard intact.
+        if action.kind.value == 'play_card':
+            if action.hand_slot is not None:
+                blocked_slots.discard(
+                    int(action.hand_slot)
+                )
+            reserved_elixir = max(
+                0.0,
+                reserved_elixir
+                - float(action.metadata[
+                    'policy_effective_cost'
+                ]),
+            )
+        elif action.kind.value == 'activate_ability':
+            if action.source_entity is not None:
+                blocked_abilities.discard(
+                    int(action.source_entity)
+                )
+            reserved_elixir = max(
+                0.0,
+                reserved_elixir - 3.0,
+            )
+
         obs = self.adapter.build_observation(
             state,
-            self.executor.blocked_slots(state),
-            self.executor.reserved_elixir,
-            self.executor.blocked_abilities(),
+            tuple(sorted(blocked_slots)),
+            reserved_elixir,
+            tuple(sorted(blocked_abilities)),
         )
         self.actuator.guard_hero_hud = self.adapter.quality.get('ability_hud_excluded', False)
         if action.kind.value == 'activate_ability':

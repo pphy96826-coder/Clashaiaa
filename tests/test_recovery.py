@@ -109,9 +109,11 @@ class RecoveryTests(unittest.TestCase):
         agent.adapter = Mock()
         agent.adapter.build_observation.side_effect = RuntimeError('stop-after-call')
         agent.executor = Mock()
-        agent.executor.blocked_slots.return_value = (1,)
-        agent.executor.reserved_elixir = 3.0
-        agent.executor.blocked_abilities.return_value = ('ability-lock',)
+        # The raw executor view includes the queued action itself
+        # (slot 0 / one elixir) plus an unrelated protected slot/resource.
+        agent.executor.blocked_slots.return_value = (0, 1)
+        agent.executor.reserved_elixir = 4.0
+        agent.executor.blocked_abilities.return_value = ()
         agent.actuator = Mock()
 
         action = ActionV1(
@@ -134,7 +136,7 @@ class RecoveryTests(unittest.TestCase):
             state,
             (1,),
             3.0,
-            ('ability-lock',),
+            (),
         )
 
     def test_same_match_resumes_after_stall_with_a_destroyed_tower(self):
