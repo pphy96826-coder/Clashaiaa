@@ -987,6 +987,51 @@ class CustomCardDeployAgent:
                                 ),
                             )
 
+                        if (
+                            overflow_fallback is None
+                            and all(
+                                action.kind.value == 'wait'
+                                for action in decoded.actions
+                            )
+                            and obs.action_mask.reasons.get(
+                                'neutral_overflow_active')
+                        ):
+                            neutral_overflow_fallback = (
+                                self.adapter.neutral_overflow_fallback(
+                                    state, obs)
+                            )
+
+                            if neutral_overflow_fallback is not None:
+                                decoded = type(decoded)(
+                                    owner=decoded.owner,
+                                    actions=(
+                                        neutral_overflow_fallback,
+                                    ),
+                                )
+                                self.log(
+                                    'neutral_overflow_fallback',
+                                    tick=state.tick,
+                                    elixir=state.elixir,
+                                    slot=(
+                                        neutral_overflow_fallback
+                                        .hand_slot
+                                    ),
+                                    card=(
+                                        neutral_overflow_fallback
+                                        .card_id
+                                    ),
+                                    target_grid=(
+                                        neutral_overflow_fallback
+                                        .target_grid
+                                    ),
+                                    mode=(
+                                        neutral_overflow_fallback
+                                        .metadata.get(
+                                            'neutral_overflow_mode'
+                                        )
+                                    ),
+                                )
+
                         adjusted = []
                         for action in decoded.actions:
                             # A valid mirror already contains the target at

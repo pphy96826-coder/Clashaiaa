@@ -1676,6 +1676,95 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.hand_slots[1])
         self.assertTrue(o.action_mask.hand_slots[3])
 
+    def test_neutral_overflow_wait_fallback_prefers_cheap_cycle(self):
+        raw = opening()
+        hand = (
+            26000010,  # Skeletons
+            26000021,  # Hog Rider
+            27000000,  # Cannon
+            28000000,  # Fireball
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'neutral-overflow-cycle')
+        s.elixir = 10.0
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons['neutral_overflow_active']
+        )
+
+        action = a.neutral_overflow_fallback(s, o)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action.card_id, 26000010)
+        self.assertEqual(
+            action.metadata['neutral_overflow_mode'],
+            'cheap_cycle',
+        )
+
+    def test_neutral_overflow_wait_fallback_uses_hog_before_defense_package(self):
+        raw = opening()
+        hand = (
+            26000021,  # Hog Rider
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'neutral-overflow-hog')
+        s.elixir = 10.0
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+        action = a.neutral_overflow_fallback(s, o)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action.card_id, 26000021)
+        self.assertEqual(
+            action.metadata['neutral_overflow_mode'],
+            'hog_pressure',
+        )
+        self.assertNotIn(
+            action.card_id,
+            (26000014, 27000000, 28000000),
+        )
+
+    def test_neutral_overflow_fallback_stays_off_below_soft_cap(self):
+        a, s = self.adapter()
+        s.elixir = 9.0
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertFalse(
+            o.action_mask.reasons['neutral_overflow_active']
+        )
+        self.assertIsNone(
+            a.neutral_overflow_fallback(s, o)
+        )
+
     def test_defensive_pressure_immediately_releases_neutral_patience(self):
         a, s = self.adapter()
         s.elixir = 6.0

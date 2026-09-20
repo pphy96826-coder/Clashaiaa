@@ -44,6 +44,7 @@ ICE_SPIRIT = 26000030
 ICE_GOLEM = 26000038
 CANNON = 27000000
 FIREBALL = 28000000
+THE_LOG = 28000011
 MINER = 26000032
 DEFENSIVE_LANE_CARDS = frozenset((26000010, 26000014, 26000030, 26000038, CANNON))
 COUNTERPUSH_SUPPORT_CARDS = frozenset((26000014, 203000014, 26000038))
@@ -1885,6 +1886,164 @@ class FeatureAdapter:
         return masked
 
 
+    def neutral_overflow_fallback(self, state, observation):
+        """Spend a safe neutral card when a near-cap model WAIT would leak elixir.
+
+        This only runs after the policy itself chose WAIT. It deliberately
+        excludes Cannon, Musketeer, and Fireball so anti-overflow cannot burn
+        the defensive package just to avoid sitting at ten elixir.
+        """
+        mask = observation.action_mask
+        reasons = mask.reasons
+
+        if not reasons.get('neutral_overflow_active'):
+            return None
+
+        priority = {
+            SKELETONS: 0,
+            ICE_SPIRIT: 1,
+            THE_LOG: 2,
+            ICE_GOLEM: 3,
+            HOG_RIDER: 4,
+        }
+        candidates = []
+
+        for slot, cid in enumerate(state.hand_cards):
+            cid = int(cid)
+
+            if (
+                cid not in priority
+                or slot >= len(mask.hand_slots)
+                or not mask.hand_slots[slot]
+            ):
+                continue
+
+            entry = mask.placement_masks.get(str(slot))
+
+            if not isinstance(entry, dict):
+                continue
+
+            cost = entry.get('effective_cost')
+
+            if not isinstance(cost, (int, float)):
+                continue
+
+            candidates.append((
+                priority[cid],
+                slot,
+                cid,
+                float(cost),
+                entry,
+            ))
+
+        if not candidates:
+            return None
+
+        _, slot, cid, cost, entry = min(candidates)
+
+        enemy_princess = [
+            tower
+            for tower in observation.towers
+            if (
+                tower.owner != state.local_owner
+                and tower.tower_kind.startswith('princess_')
+                and tower.hitpoints > 0
+            )
+        ]
+        weakest_tower = (
+            min(
+                enemy_princess,
+                key=lambda tower: (
+                    tower.hitpoints
+                    / max(1.0, tower.max_hitpoints),
+                    tower.hitpoints,
+                    tower.tower_kind,
+                ),
+            )
+            if enemy_princess
+            else None
+        )
+        attack_x = (
+            float(weakest_tower.position[0])
+            if weakest_tower is not None
+            else 3500.0
+        )
+
+        if cid == HOG_RIDER:
+            preferred_x = attack_x
+            preferred_depth = 14500.0
+            mode = 'hog_pressure'
+        elif cid == THE_LOG:
+            preferred_x = attack_x
+            preferred_depth = 15000.0
+            mode = 'cheap_cycle'
+        else:
+            preferred_x = 9000.0
+            preferred_depth = (
+                5000.0
+                if cid == SKELETONS
+                else 6000.0
+                if cid == ICE_SPIRIT
+                else 7000.0
+            )
+            mode = 'cheap_cycle'
+
+        subcell = (
+            entry.get('model_subcell_offset')
+            or (0.0, 0.0)
+        )
+        dx = float(subcell[0] or 0.0)
+        dy = float(subcell[1] or 0.0)
+        sign = 1.0 if self.actor_owner == 0 else -1.0
+        legal = []
+
+        for gy, row in enumerate(entry['row_major']):
+            for gx, allowed in enumerate(row):
+                if not allowed:
+                    continue
+
+                wx = (
+                    gx + 0.5 + sign * dx
+                ) * 1000.0
+                wy = (
+                    gy + 0.5 + sign * dy
+                ) * 1000.0
+                depth = self._defensive_depth(wy)
+                score = (
+                    (wx - preferred_x) ** 2
+                    + 0.4
+                    * (depth - preferred_depth) ** 2
+                )
+                legal.append((score, gx, gy))
+
+        if not legal:
+            return None
+
+        _, gx, gy = min(legal)
+
+        return ActionV1(
+            owner=state.local_owner,
+            kind=ActionKind.PLAY_CARD,
+            hand_slot=slot,
+            card_id=cid,
+            target_kind=TargetKind.GRID,
+            target_grid=(gx, gy),
+            subcell_offset=(
+                sign * dx,
+                sign * dy,
+            ),
+            execute_offset_ticks=1,
+            next_decision_ticks=config.DECISION_TICKS,
+            metadata={
+                'policy_effective_cost': cost,
+                'policy_effective_form_code': int(
+                    entry.get('form_code', 0) or 0),
+                'neutral_overflow_fallback': True,
+                'neutral_overflow_mode': mode,
+            },
+        )
+
+
     def defense_overflow_fallback(self, state, observation):
         """Choose one already-approved formation action after a capped WAIT."""
         mask = observation.action_mask
@@ -2542,6 +2701,10 @@ class FeatureAdapter:
             float(elixir) >= DEFENSE_OVERFLOW_ELIXIR
             and strategy_phase in ('defend', 'prepare_defense')
         )
+        neutral_overflow_active = (
+            float(elixir) >= DEFENSE_OVERFLOW_ELIXIR
+            and strategy_phase == 'neutral'
+        )
 
         defense_overflow_hard_cap = (
             defense_overflow_active
@@ -2642,6 +2805,8 @@ class FeatureAdapter:
             backfield_patience)
         self.quality['defense_overflow_active'] = bool(
             defense_overflow_active)
+        self.quality['neutral_overflow_active'] = bool(
+            neutral_overflow_active)
         last_exact = self._last_opponent_exact_play
         self.quality['opponent_last_exact_play_card_id'] = (
             last_exact.get('card_id') if last_exact else None)
@@ -3224,6 +3389,8 @@ class FeatureAdapter:
                          backfield_patience),
                      'defense_overflow_active': bool(
                          defense_overflow_active),
+                     'neutral_overflow_active': bool(
+                         neutral_overflow_active),
                      'defense_overflow_hard_cap': bool(
                          defense_overflow_hard_cap),
                      'defense_overflow_forced': bool(
