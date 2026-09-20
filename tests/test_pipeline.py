@@ -1297,6 +1297,78 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(
             musk['heavy_defense_musketeer_max_defensive_depth'], 9500.0)
 
+    def test_heavy_defense_priority_skips_unaffordable_preferred_card(self):
+        raw = opening()
+        hand = (26000014, 26000038, 27000000, 26000010)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-priority-affordable')
+        s.elixir = 3.0
+
+        add_enemy(s, 9210, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9210)
+        giant['y'] = 13000
+        s.tick += 1
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_stage'],
+            'backline_then_body',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_card_id'],
+            26000038,
+        )
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'insufficient_elixir',
+        )
+        self.assertTrue(o.action_mask.hand_slots[1])
+
+    def test_heavy_defense_priority_skips_blocked_preferred_slot(self):
+        raw = opening()
+        hand = (26000014, 26000038, 27000000, 26000010)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'heavy-priority-blocked')
+        s.elixir = 10.0
+
+        add_enemy(s, 9211, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+        a.tensorize(s)
+
+        giant = next(ent for ent in s.entities if ent['id'] == 9211)
+        giant['y'] = 13000
+        s.tick += 1
+        _, o = a.tensorize(s, blocked_slots=(0,))
+
+        self.assertEqual(
+            o.action_mask.reasons['heavy_defend_priority_card_id'],
+            26000038,
+        )
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'pending_or_cooldown',
+        )
+        self.assertTrue(o.action_mask.hand_slots[1])
+
     def test_heavy_defense_emergency_releases_core_sequence(self):
         raw = opening()
         hand = (26000014, 27000000, 26000038, 26000010)

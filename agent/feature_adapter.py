@@ -1821,18 +1821,19 @@ class FeatureAdapter:
             )
         return masked
 
-    @staticmethod
-    def _heavy_defense_priority(slots, core_depth):
-        """Choose at most one key body/anchor commitment for this decision.
+    def _heavy_defense_priority(
+            self, slots, core_depth, *, effective_elixir, blocked_slots=()):
+        """Choose one currently actionable core commitment for this decision.
 
-        Heavy defense should build a shape, not dump Cannon, Musketeer and Ice
-        Golem on consecutive stale frames.  The preferred order changes with
-        approach depth: set the backline first, then anchor the tank, then add
-        the body.  At emergency depth all key cards are released because a
-        strict sequence is less important than immediate survival.
+        Sequencing must never wait for a preferred card that cannot actually
+        be played on this frame.  Reserved elixir and slot guards are already
+        reflected in effective_elixir/blocked_slots, so fall through to the
+        next role instead of freezing an affordable defender behind an
+        unaffordable or pending card.
         """
         if core_depth is None:
             return {'card_id': None, 'stage': None, 'emergency': False}
+
         depth = float(core_depth)
         if depth <= HEAVY_DEFEND_EMERGENCY_DEPTH:
             return {
@@ -1840,7 +1841,20 @@ class FeatureAdapter:
                 'stage': 'emergency_release',
                 'emergency': True,
             }
-        cards = set(int(cid) for cid in slots.values())
+
+        blocked = {int(slot) for slot in blocked_slots}
+        cards = set()
+        for slot, cid in slots.items():
+            cid = int(cid)
+            if int(slot) in blocked:
+                continue
+            spec = self.bundle.card_specs.get(cid)
+            if spec is None:
+                continue
+            if float(spec.elixir_cost) > float(effective_elixir):
+                continue
+            cards.add(cid)
+
         if depth > HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH:
             return {
                 'card_id': None,
@@ -2812,7 +2826,12 @@ class FeatureAdapter:
             if defending_incoming_push else None
         )
         heavy_priority = (
-            self._heavy_defense_priority(slots, heavy_core_depth)
+            self._heavy_defense_priority(
+                slots,
+                heavy_core_depth,
+                effective_elixir=elixir,
+                blocked_slots=blocked_slots,
+            )
             if defending_incoming_push
             else {'card_id': None, 'stage': None, 'emergency': False}
         )
