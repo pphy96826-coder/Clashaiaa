@@ -280,26 +280,27 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.reasons['incoming_push_reserve_defenders'])
         self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
 
-        # At the cap, overflow formation takes priority over both cheap cycle
-        # and the optional Hog punish: establish the real backline defender
-        # first instead of leaking elixir or wasting Cannon lifetime.
+        # The heavy core is still far beyond the backline release window.
+        # Near-cap handling may cycle, but it must not bypass wait-for-approach
+        # and force Musketeer into the arena this early.
         self.assertTrue(o.action_mask.reasons['defense_overflow_active'])
         self.assertTrue(o.action_mask.reasons['defense_overflow_forced'])
         self.assertEqual(
             o.action_mask.reasons['defense_overflow_mode'],
-            'backline_setup',
+            'cycle_then_prebuild',
         )
         self.assertEqual(
-            o.action_mask.reasons['defense_overflow_safe_slots'],
-            (1,),
+            o.action_mask.reasons['heavy_defend_priority_stage'],
+            None,
         )
-        self.assertTrue(o.action_mask.hand_slots[1])
-        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_reserve_incoming_push',
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertTrue(o.action_mask.hand_slots[3])
         self.assertFalse(o.action_mask.hand_slots[2])
-        self.assertEqual(
-            o.action_mask.reasons['slot_reasons']['2'],
-            'strategy_defense_overflow_formation',
-        )
 
         # The heavy-commit opportunity still exists underneath the formation
         # priority. Once we are below the overflow threshold, Hog is released
@@ -1118,10 +1119,19 @@ class AdapterTests(unittest.TestCase):
         )
 
         s.tick += 1
+        a.tensorize(s)
+
+        giant = next(
+            ent for ent in s.entities
+            if ent['id'] == 9340
+        )
+        giant['y'] = 15000
+        s.tick += 1
 
         _, first = a.tensorize(s)
 
-        # First spend is the real backline unit, not Skeletons.
+        # Once the core reaches the backline release window, the first
+        # structural spend is the real backline unit, not Skeletons.
         self.assertEqual(
             first.action_mask.reasons[
                 'defense_overflow_mode'],

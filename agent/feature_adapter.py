@@ -3110,6 +3110,9 @@ class FeatureAdapter:
                         or (
                             cid == MUSKETEER
                             and defense_overflow_active
+                            and heavy_core_depth is not None
+                            and heavy_core_depth
+                                <= HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH
                         )
                     )):
                 slot_reasons[str(slot)] = 'strategy_reserve_incoming_push'
@@ -3134,7 +3137,6 @@ class FeatureAdapter:
                 and cid == MUSKETEER
                 and heavy_core_depth
                     > HEAVY_DEFEND_MUSKETEER_RELEASE_DEPTH
-                and not defense_overflow_active
             ):
                 slot_reasons[str(slot)] = (
                     'strategy_hold_musketeer_for_incoming_push'
