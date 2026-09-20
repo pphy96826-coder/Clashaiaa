@@ -49,10 +49,14 @@ THE_LOG = 28000011
 MINER = 26000032
 DEFENSIVE_LANE_CARDS = frozenset((26000010, 26000014, 26000030, 26000038, CANNON))
 COUNTERPUSH_SUPPORT_CARDS = frozenset((26000014, 203000014, 26000038))
-NEUTRAL_PATIENCE_CARDS = frozenset((HOG_RIDER, MUSKETEER, CANNON, FIREBALL))
+# Neutral play is resource-posture driven. A deficit may hold the purely
+# offensive Hog commitment, but defensive/setup cards remain available so the
+# model can spend in the right place instead of being forced to WAIT.
+NEUTRAL_PATIENCE_CARDS = frozenset((HOG_RIDER,))
 ATTACK_HOLD_TOWER_DISTANCE = 7000.0
 ATTACK_HOLD_MIN_EFFECTIVE_ELIXIR = 8.0
-NEUTRAL_PATIENCE_RELEASE_ELIXIR = 8.5
+RESOURCE_POSTURE_MARGIN = 1.0
+RESOURCE_UNKNOWN_BOARD_MARGIN = 2.0
 RECENT_BUILDING_ATTACK_WINDOW_TICKS = 50
 LOW_ELIXIR_ATTACK_MAX_UPPER = 4.0
 LOW_ELIXIR_ATTACK_MAX_WIDTH = 1.0
@@ -230,6 +234,7 @@ class FeatureAdapter:
         self._incoming_push_cores = {}
         self._backfield_commitments = {}
         self._prelock_context = None
+        self._board_value_baselines = {}
 
     def _effect_provenance(self, semantic, entity_id):
         if not self._effects_by_entity.get(entity_id, ((), False))[1]:
@@ -1541,7 +1546,8 @@ class FeatureAdapter:
     def _attack_opportunity_context(effective_elixir, *, defensive_pressure=False,
                                     near_tower_pressure=None, incoming_push=None,
                                     counterpush=None, building_window=None,
-                                    low_elixir_window=None):
+                                    low_elixir_window=None,
+                                    resource_context=None):
         """Collapse offensive timing signals into one ordered public context.
 
         The context is advisory and deliberately conservative: defense always
@@ -1598,7 +1604,21 @@ class FeatureAdapter:
                 'opponent_elixir_lower': low_elixir_window.get('lower'),
                 'opponent_elixir_upper': low_elixir_window.get('upper'),
             }
-        if float(effective_elixir) >= NEUTRAL_PATIENCE_RELEASE_ELIXIR:
+        if (
+            resource_context is not None
+            and resource_context.get('posture') == 'attack'
+            and float(effective_elixir) >= 4.0
+        ):
+            return {
+                'kind': 'resource_advantage',
+                'reason': 'resource_advantage',
+                'release_hog': True,
+                'lane': None,
+                'resource_balance_lower': resource_context.get('balance_lower'),
+                'resource_balance_estimate': resource_context.get(
+                    'balance_estimate'),
+            }
+        if float(effective_elixir) >= DEFENSE_OVERFLOW_ELIXIR:
             return {
                 'kind': 'anti_overflow',
                 'reason': 'near_elixir_cap',
@@ -1668,6 +1688,114 @@ class FeatureAdapter:
         """
         y = float(y)
         return y if self.actor_owner == 0 else 32000.0 - y
+
+    def _board_value_source(self, ent):
+        origin = ent.get('deployment_origin')
+        if isinstance(origin, Mapping):
+            source = origin.get('source_card_id')
+            if isinstance(source, int) and source in self.bundle.card_specs:
+                return int(source)
+        cid = ent.get('card_id')
+        if isinstance(cid, int) and cid in self.bundle.card_specs:
+            return int(cid)
+        return None
+
+    def _board_value_group_key(self, eid, ent, source_card_id):
+        origin = ent.get('deployment_origin')
+        if isinstance(origin, Mapping):
+            epoch = origin.get('epoch')
+            sequence = origin.get('sequence')
+            if isinstance(epoch, int) and isinstance(sequence, int):
+                return ('deployment', int(ent.get('owner', -1)), epoch, sequence)
+        return (
+            'observed',
+            int(ent.get('owner', -1)),
+            int(source_card_id),
+            int(self._first_seen.get(int(eid), self._observed_tick)),
+        )
+
+    def _board_elixir_value(self, owner):
+        """HP-weighted surviving card value without multiplying swarm bodies."""
+        groups = {}
+        for eid, ent in self._live_entities.items():
+            if int(ent.get('owner', -1)) != int(owner):
+                continue
+            hp = ent.get('hp')
+            if not isinstance(hp, (int, float)) or float(hp) <= 0.0:
+                continue
+            source_card_id = self._board_value_source(ent)
+            if source_card_id is None:
+                continue
+            spec = self.bundle.card_specs.get(source_card_id)
+            if spec is None or spec.kind.value not in ('troop', 'building'):
+                continue
+            key = self._board_value_group_key(eid, ent, source_card_id)
+            row = groups.setdefault(key, {
+                'cost': float(spec.elixir_cost),
+                'hp': 0.0,
+                'max_hp': 0.0,
+            })
+            row['hp'] += float(hp)
+            max_hp = ent.get('max_hp')
+            if isinstance(max_hp, (int, float)) and float(max_hp) > 0.0:
+                row['max_hp'] += float(max_hp)
+
+        total = 0.0
+        for key, row in groups.items():
+            current_max = float(row['max_hp'])
+            baseline = max(
+                float(self._board_value_baselines.get(key, 0.0)),
+                current_max,
+            )
+            if baseline > 0.0:
+                self._board_value_baselines[key] = baseline
+                fraction = max(0.0, min(1.0, float(row['hp']) / baseline))
+            else:
+                fraction = 1.0
+            total += float(row['cost']) * fraction
+        return total
+
+    def _resource_balance_context(self, effective_elixir, opponent_elixir_bounds):
+        own_board = self._board_elixir_value(self.actor_owner)
+        opponent_board = self._board_elixir_value(1 - self.actor_owner)
+        own_total = float(effective_elixir) + own_board
+
+        lower = upper = estimate = None
+        opponent_low = opponent_high = None
+        if opponent_elixir_bounds is not None:
+            opponent_low, opponent_high = map(float, opponent_elixir_bounds)
+            lower = own_total - (opponent_high + opponent_board)
+            upper = own_total - (opponent_low + opponent_board)
+            estimate = own_total - (
+                ((opponent_low + opponent_high) * 0.5) + opponent_board
+            )
+            if lower >= RESOURCE_POSTURE_MARGIN:
+                posture = 'attack'
+            elif upper <= -RESOURCE_POSTURE_MARGIN:
+                posture = 'defend'
+            else:
+                posture = 'balanced'
+        else:
+            board_delta = own_board - opponent_board
+            if board_delta >= RESOURCE_UNKNOWN_BOARD_MARGIN:
+                posture = 'attack'
+            elif board_delta <= -RESOURCE_UNKNOWN_BOARD_MARGIN:
+                posture = 'defend'
+            else:
+                posture = 'balanced'
+
+        return {
+            'posture': posture,
+            'own_elixir': float(effective_elixir),
+            'opponent_elixir_lower': opponent_low,
+            'opponent_elixir_upper': opponent_high,
+            'own_board_value': own_board,
+            'opponent_board_value': opponent_board,
+            'own_total_value': own_total,
+            'balance_lower': lower,
+            'balance_upper': upper,
+            'balance_estimate': estimate,
+        }
 
     def _has_defensive_pressure(self):
         """Whether any live enemy is already in our central/defensive half.
@@ -2146,13 +2274,31 @@ class FeatureAdapter:
         if not reasons.get('neutral_overflow_active'):
             return None
 
-        priority = {
-            SKELETONS: 0,
-            ICE_SPIRIT: 1,
-            THE_LOG: 2,
-            ICE_GOLEM: 3,
-            HOG_RIDER: 4,
-        }
+        posture = str(reasons.get('resource_posture') or 'balanced')
+        if posture == 'attack':
+            priority = {
+                HOG_RIDER: 0,
+                ICE_SPIRIT: 1,
+                SKELETONS: 2,
+                ICE_GOLEM: 3,
+                THE_LOG: 4,
+            }
+        elif posture == 'defend':
+            priority = {
+                ICE_SPIRIT: 0,
+                SKELETONS: 1,
+                ICE_GOLEM: 2,
+                THE_LOG: 3,
+                MUSKETEER: 4,
+            }
+        else:
+            priority = {
+                SKELETONS: 0,
+                ICE_SPIRIT: 1,
+                THE_LOG: 2,
+                ICE_GOLEM: 3,
+                HOG_RIDER: 4,
+            }
         candidates = []
 
         for slot, cid in enumerate(state.hand_cards):
@@ -2226,6 +2372,10 @@ class FeatureAdapter:
             preferred_x = attack_x
             preferred_depth = 14500.0
             mode = 'hog_pressure'
+        elif cid == MUSKETEER:
+            preferred_x = 9000.0
+            preferred_depth = 5500.0
+            mode = 'resource_defense'
         elif cid == THE_LOG:
             preferred_x = attack_x
             preferred_depth = 15000.0
@@ -2892,6 +3042,9 @@ class FeatureAdapter:
             opponent_elixir_bounds[0] if opponent_elixir_bounds else None)
         self.quality['opponent_elixir_upper'] = (
             opponent_elixir_bounds[1] if opponent_elixir_bounds else None)
+        resource_context = self._resource_balance_context(
+            elixir, opponent_elixir_bounds)
+        resource_posture = resource_context['posture']
         near_tower_pressure = self._near_tower_pressure()
         defensive_pressure = (
             self._has_defensive_pressure() or prelock is not None
@@ -2995,6 +3148,7 @@ class FeatureAdapter:
             counterpush=counterpush,
             building_window=building_attack_window,
             low_elixir_window=low_elixir_attack_window,
+            resource_context=resource_context,
         )
 
         strategy_phase = (
@@ -3169,13 +3323,13 @@ class FeatureAdapter:
         neutral_patience_relaxed_no_cycle = bool(
             strategy_phase == 'neutral'
             and backfield_commitment is None
-            and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
+            and resource_posture == 'defend'
             and not neutral_patience_safe_slots
         )
         neutral_patience = (
             strategy_phase == 'neutral'
             and backfield_commitment is None
-            and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
+            and resource_posture == 'defend'
             and bool(neutral_patience_safe_slots)
         )
         # Backward-compatible attack-window diagnostics remain limited to the
@@ -3195,6 +3349,22 @@ class FeatureAdapter:
             attack_opportunity.get('lane') if attack_opportunity else None
         )
         self.quality['strategy_phase'] = strategy_phase
+        self.quality['resource_posture'] = resource_posture
+        self.quality['resource_own_board_value'] = round(
+            resource_context['own_board_value'], 3)
+        self.quality['resource_opponent_board_value'] = round(
+            resource_context['opponent_board_value'], 3)
+        self.quality['resource_own_total_value'] = round(
+            resource_context['own_total_value'], 3)
+        self.quality['resource_balance_lower'] = (
+            round(resource_context['balance_lower'], 3)
+            if resource_context['balance_lower'] is not None else None)
+        self.quality['resource_balance_upper'] = (
+            round(resource_context['balance_upper'], 3)
+            if resource_context['balance_upper'] is not None else None)
+        self.quality['resource_balance_estimate'] = (
+            round(resource_context['balance_estimate'], 3)
+            if resource_context['balance_estimate'] is not None else None)
         self.quality['attack_hold_reason'] = (
             attack_hold['reason'] if attack_hold else None)
         self.quality['attack_hold_distance'] = (
@@ -3545,7 +3715,9 @@ class FeatureAdapter:
 
             if neutral_patience and cid in NEUTRAL_PATIENCE_CARDS:
                 if not (cid == HOG_RIDER and hog_opportunity_release):
-                    slot_reasons[str(slot)] = 'strategy_neutral_patience'
+                    slot_reasons[str(slot)] = (
+                        'strategy_resource_deficit_attack_hold'
+                    )
                     continue
             entry = self.build_placement_mask(cid, lanes, towers, entities,
                 form_code=selections[cid]['active_form'] if selections is not None else 0,
@@ -3624,6 +3796,29 @@ class FeatureAdapter:
                     defensive_fireball_points,
                     DEFENSIVE_FIREBALL_TARGET_RADIUS,
                     'defensive_fireball',
+                )
+            elif (
+                strategy_phase == 'neutral'
+                and resource_posture == 'defend'
+                and cid == FIREBALL
+            ):
+                resource_fireball_points = tuple(
+                    (float(ent['x']), float(ent['y']))
+                    for ent in self._live_entities.values()
+                    if (
+                        int(ent.get('owner', -1)) != self.actor_owner
+                        and int(ent.get('card_id', -1)) > 0
+                        and (
+                            ent.get('hp') is None
+                            or float(ent.get('hp')) > 0
+                        )
+                    )
+                )
+                entry = self._mask_spell_near_points(
+                    entry,
+                    resource_fireball_points,
+                    DEFENSIVE_FIREBALL_TARGET_RADIUS,
+                    'resource_deficit_fireball',
                 )
             if cid == HOG_RIDER and hog_opportunity_lane is not None:
                 entry = self._mask_to_lane(
@@ -4049,7 +4244,25 @@ class FeatureAdapter:
                      'neutral_patience_active': neutral_patience,
                      'neutral_patience_relaxed_no_cycle': bool(
                          neutral_patience_relaxed_no_cycle),
-                     'neutral_patience_release_elixir': NEUTRAL_PATIENCE_RELEASE_ELIXIR,
+                     'resource_posture': resource_posture,
+                     'resource_own_board_value': round(
+                         resource_context['own_board_value'], 3),
+                     'resource_opponent_board_value': round(
+                         resource_context['opponent_board_value'], 3),
+                     'resource_own_total_value': round(
+                         resource_context['own_total_value'], 3),
+                     'resource_balance_lower': (
+                         round(resource_context['balance_lower'], 3)
+                         if resource_context['balance_lower'] is not None
+                         else None),
+                     'resource_balance_upper': (
+                         round(resource_context['balance_upper'], 3)
+                         if resource_context['balance_upper'] is not None
+                         else None),
+                     'resource_balance_estimate': (
+                         round(resource_context['balance_estimate'], 3)
+                         if resource_context['balance_estimate'] is not None
+                         else None),
                      'attack_opportunity_active': attack_opportunity is not None,
                      'attack_opportunity_kind': (
                          attack_opportunity.get('kind') if attack_opportunity else None),
