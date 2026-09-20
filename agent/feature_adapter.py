@@ -113,6 +113,19 @@ LOW_VALUE_DEFENSE_HELD_CARDS = frozenset((
 LOW_VALUE_DEFENSE_OVERFLOW_CARDS = frozenset((
     SKELETONS, ICE_SPIRIT, THE_LOG,
 ))
+SINGLE_RANGED_SUPPORT_MIN_COST = 2.0
+SINGLE_RANGED_SUPPORT_MAX_COST = 4.0
+SINGLE_RANGED_SUPPORT_MIN_RANGE_TILES = 2.0
+SINGLE_RANGED_SUPPORT_PRIMARY_RESPONSES = frozenset((
+    MUSKETEER, ICE_GOLEM, SKELETONS, ICE_SPIRIT, THE_LOG,
+))
+SINGLE_RANGED_SUPPORT_HELD_CARDS = frozenset((
+    CANNON, FIREBALL,
+))
+SINGLE_RANGED_SUPPORT_COVER_CARDS = frozenset((
+    MUSKETEER, 203000014, ICE_GOLEM,
+))
+DEFENSIVE_FIREBALL_TARGET_RADIUS = 4500.0
 
 # Cannon may be placed before the tank reaches its final pull radius, provided
 # the observed approach says the tank should arrive while the building still
@@ -1720,6 +1733,83 @@ class FeatureAdapter:
             'lane': 'left' if float(ent['x']) < 9000.0 else 'right',
         }
 
+    def _single_ranged_support_threat_context(self, incoming_push=None):
+        """Return one local medium ranged troop that should not draw a full package.
+
+        This separates support troops such as Musketeer/Ice-Wizard-style
+        bodies from building-targeting melee pressure.  A tracked heavy push
+        or a second local enemy disables the gate immediately.
+        """
+        if incoming_push is not None:
+            return None
+
+        local = []
+        for ent in self._live_entities.values():
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+
+            card_id = int(ent.get('card_id', -1))
+            spec = self.bundle.card_specs.get(card_id)
+            if spec is None or spec.kind.value != 'troop':
+                continue
+
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+
+            depth = self._defensive_depth(ent['y'])
+            if depth > 14500.0:
+                continue
+
+            cost = float(spec.elixir_cost)
+            attack_range = getattr(spec, 'range_tiles', None)
+            if (
+                cost < SINGLE_RANGED_SUPPORT_MIN_COST
+                or cost > SINGLE_RANGED_SUPPORT_MAX_COST
+                or not isinstance(attack_range, (int, float))
+                or float(attack_range)
+                    < SINGLE_RANGED_SUPPORT_MIN_RANGE_TILES
+            ):
+                continue
+
+            local.append((ent, depth, cost, float(attack_range)))
+
+        if len(local) != 1:
+            return None
+
+        ent, depth, cost, attack_range = local[0]
+        lane = 'left' if float(ent['x']) < 9000.0 else 'right'
+
+        cover = []
+        for own in self._live_entities.values():
+            if int(own.get('owner', -1)) != self.actor_owner:
+                continue
+            if int(own.get('card_id', -1)) not in SINGLE_RANGED_SUPPORT_COVER_CARDS:
+                continue
+            hp = own.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+            if self._defensive_depth(own['y']) > 17000.0:
+                continue
+            own_lane = 'left' if float(own['x']) < 9000.0 else 'right'
+            if own_lane != lane:
+                continue
+            cover.append({
+                'entity_id': int(own['id']),
+                'card_id': int(own.get('card_id', -1)),
+            })
+
+        return {
+            'entity_id': int(ent['id']),
+            'card_id': int(ent.get('card_id', -1)),
+            'cost': float(cost),
+            'range_tiles': float(attack_range),
+            'depth': float(depth),
+            'lane': lane,
+            'covered': bool(cover),
+            'cover': tuple(cover),
+        }
+
     def _single_defensive_threat_lane(self):
         """Return one unambiguous enemy lane inside our defensive half."""
         enemy = []
@@ -1962,6 +2052,34 @@ class FeatureAdapter:
         masked[f'{metadata_prefix}_target_x'] = float(world_x)
         masked[f'{metadata_prefix}_target_y'] = float(world_y)
         masked[f'{metadata_prefix}_target_radius'] = float(radius)
+        return masked
+
+    @staticmethod
+    def _mask_spell_near_points(entry, points, radius, metadata_prefix):
+        masked = dict(entry)
+        points = tuple(
+            (float(px), float(py))
+            for px, py in points
+        )
+        subcell = masked.get('model_subcell_offset') or (0.0, 0.0)
+        dx, dy = float(subcell[0] or 0.0), float(subcell[1] or 0.0)
+        rows = []
+        for y, row in enumerate(masked['row_major']):
+            out = []
+            for x, allowed in enumerate(row):
+                gx = (float(x) + 0.5 + dx) * 1000.0
+                gy = (float(y) + 0.5 + dy) * 1000.0
+                out.append(
+                    bool(allowed)
+                    and any(
+                        math.hypot(gx - px, gy - py) <= float(radius)
+                        for px, py in points
+                    )
+                )
+            rows.append(tuple(out))
+        masked['row_major'] = tuple(rows)
+        masked[f'{metadata_prefix}_target_radius'] = float(radius)
+        masked[f'{metadata_prefix}_target_count'] = len(points)
         return masked
 
 
@@ -2728,6 +2846,11 @@ class FeatureAdapter:
                 backfield_commitment=backfield_commitment,
             )
         )
+        single_ranged_support_threat = (
+            self._single_ranged_support_threat_context(
+                incoming_push=incoming_push,
+            )
+        )
 
         preparing_for_push = (
             incoming_push is not None
@@ -2909,6 +3032,34 @@ class FeatureAdapter:
             )
         )
 
+        single_ranged_support_response_available = bool(
+            single_ranged_support_threat is not None
+            and any(
+                (
+                    int(slot) not in blocked_slot_set
+                    and int(cid) in SINGLE_RANGED_SUPPORT_PRIMARY_RESPONSES
+                    and self.bundle.card_specs.get(int(cid)) is not None
+                    and float(self.bundle.card_specs[int(cid)].elixir_cost)
+                        <= float(elixir)
+                )
+                for slot, cid in slots.items()
+            )
+        )
+
+        defensive_fireball_points = tuple(
+            (float(ent['x']), float(ent['y']))
+            for ent in self._live_entities.values()
+            if (
+                int(ent.get('owner', -1)) != self.actor_owner
+                and int(ent.get('card_id', -1)) > 0
+                and (
+                    ent.get('hp') is None
+                    or float(ent.get('hp')) > 0
+                )
+                and self._defensive_depth(ent['y']) <= 14500.0
+            )
+        )
+
         def neutral_cycle_slot_available(slot, cid):
             cid = int(cid)
             slot = int(slot)
@@ -3036,6 +3187,14 @@ class FeatureAdapter:
         self.quality['low_value_defensive_threat_entity_id'] = (
             low_value_defensive_threat.get('entity_id')
             if low_value_defensive_threat else None)
+        self.quality['single_ranged_support_threat_active'] = bool(
+            single_ranged_support_threat)
+        self.quality['single_ranged_support_threat_card_id'] = (
+            single_ranged_support_threat.get('card_id')
+            if single_ranged_support_threat else None)
+        self.quality['single_ranged_support_threat_covered'] = bool(
+            single_ranged_support_threat
+            and single_ranged_support_threat.get('covered'))
         last_exact = self._last_opponent_exact_play
         self.quality['opponent_last_exact_play_card_id'] = (
             last_exact.get('card_id') if last_exact else None)
@@ -3161,6 +3320,24 @@ class FeatureAdapter:
             ):
                 slot_reasons[str(slot)] = (
                     'strategy_hold_core_defense_for_low_value_threat'
+                )
+                continue
+            if (
+                single_ranged_support_threat is not None
+                and single_ranged_support_response_available
+                and cid in SINGLE_RANGED_SUPPORT_HELD_CARDS
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_overdefense_for_single_ranged_support'
+                )
+                continue
+            if (
+                single_ranged_support_threat is not None
+                and single_ranged_support_threat.get('covered')
+                and cid in (MUSKETEER, ICE_GOLEM)
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_extra_core_for_covered_ranged_support'
                 )
                 continue
             if (defending_incoming_push
@@ -3372,6 +3549,18 @@ class FeatureAdapter:
                     heavy_fireball['core_y'],
                     HEAVY_DEFEND_FIREBALL_TARGET_RADIUS,
                     'heavy_defense_fireball',
+                )
+            elif (
+                strategy_phase == 'defend'
+                and incoming_push is None
+                and cid == FIREBALL
+                and defensive_fireball_points
+            ):
+                entry = self._mask_spell_near_points(
+                    entry,
+                    defensive_fireball_points,
+                    DEFENSIVE_FIREBALL_TARGET_RADIUS,
+                    'defensive_fireball',
                 )
             if cid == HOG_RIDER and hog_opportunity_lane is not None:
                 entry = self._mask_to_lane(
@@ -3678,6 +3867,19 @@ class FeatureAdapter:
                      'low_value_defensive_threat_entity_id': (
                          low_value_defensive_threat.get('entity_id')
                          if low_value_defensive_threat else None),
+                     'single_ranged_support_threat_active': bool(
+                         single_ranged_support_threat),
+                     'single_ranged_support_threat_card_id': (
+                         single_ranged_support_threat.get('card_id')
+                         if single_ranged_support_threat else None),
+                     'single_ranged_support_threat_lane': (
+                         single_ranged_support_threat.get('lane')
+                         if single_ranged_support_threat else None),
+                     'single_ranged_support_threat_covered': bool(
+                         single_ranged_support_threat
+                         and single_ranged_support_threat.get('covered')),
+                     'single_ranged_support_response_available': bool(
+                         single_ranged_support_response_available),
                      'defense_overflow_hard_cap': bool(
                          defense_overflow_hard_cap),
                      'defense_overflow_forced': bool(

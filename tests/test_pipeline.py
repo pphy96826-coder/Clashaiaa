@@ -1293,6 +1293,172 @@ class AdapterTests(unittest.TestCase):
             o.action_mask.reasons[
                 'low_value_defensive_threat_active'])
 
+    def test_single_ranged_support_holds_cannon_and_fireball(self):
+        raw = opening()
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+            26000010,  # Skeletons
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'single-ranged-support')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9343, 3500, 13000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'defend',
+        )
+        self.assertTrue(
+            o.action_mask.reasons[
+                'single_ranged_support_threat_active'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'single_ranged_support_response_available'])
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['1'],
+            'strategy_hold_overdefense_for_single_ranged_support',
+        )
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_hold_overdefense_for_single_ranged_support',
+        )
+        self.assertTrue(o.action_mask.hand_slots[3])
+
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000010)
+
+    def test_single_ranged_support_existing_cover_holds_second_core(self):
+        raw = opening()
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+            26000010,  # Skeletons
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'single-ranged-support-covered')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9344, 3500, 12000,
+            card_id=26000014, hp=1000,
+        )
+        s.entities.append({
+            'id': 9345,
+            'owner': s.local_owner,
+            'card_id': 26000038,
+            'x': 3500,
+            'y': 8000,
+            'hp': 1200,
+            'max_hp': 1200,
+        })
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'single_ranged_support_threat_active'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'single_ranged_support_threat_covered'])
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'strategy_hold_extra_core_for_covered_ranged_support',
+        )
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertTrue(o.action_mask.hand_slots[3])
+
+    def test_defensive_fireball_targets_live_threat_not_empty_tower(self):
+        raw = opening()
+        hand = (
+            28000000,  # Fireball
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            26000010,  # Skeletons
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'defensive-fireball-local-target')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9346, 3500, 11000,
+            card_id=26000021, hp=1400,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(o.action_mask.hand_slots[0])
+        fireball = o.action_mask.placement_masks['0']
+        self.assertEqual(
+            fireball['defensive_fireball_target_count'],
+            1,
+        )
+        self.assertEqual(
+            fireball['defensive_fireball_target_radius'],
+            4500.0,
+        )
+
+        allowed = []
+        subcell = fireball.get('model_subcell_offset') or (0.0, 0.0)
+        dx, dy = subcell
+        for gy, row in enumerate(fireball['row_major']):
+            for gx, ok in enumerate(row):
+                if ok:
+                    allowed.append((
+                        (gx + 0.5 + dx) * 1000.0,
+                        (gy + 0.5 + dy) * 1000.0,
+                    ))
+        self.assertTrue(allowed)
+        self.assertTrue(all(
+            ((x - 3500.0) ** 2 + (y - 11000.0) ** 2) ** 0.5
+            <= 4500.0
+            for x, y in allowed
+        ))
+
     def test_live_defense_overflow_keeps_hog_as_model_choice_not_fallback(self):
         a, s = self.adapter()
 
