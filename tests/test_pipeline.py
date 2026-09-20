@@ -618,7 +618,7 @@ class AdapterTests(unittest.TestCase):
         raw = opening()
 
         hand = (
-            26000014,  # Musketeer
+            28000011,  # Log
             27000000,  # Cannon
             28000000,  # Fireball
             26000038,  # Ice Golem
