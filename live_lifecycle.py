@@ -240,6 +240,8 @@ class LiveLifecycle:
         previous = None
         stable = 0
         taps = 0
+        unknown_samples = 0
+        unknown_recovery_taps = 0
         unknown_after_result = 0
         first_result_tap_at = None
         while time.monotonic() < deadline:
@@ -252,6 +254,10 @@ class LiveLifecycle:
                     and max(abs(a-b) for a,b in zip(point, previous[1])) <= 12)
             stable = stable + 1 if same else 1
             previous = key
+            if kind == 'unknown':
+                unknown_samples = unknown_samples + 1
+            else:
+                unknown_samples = 0
             # After the result OK and the optional reward OK have both been
             # acknowledged, one positive lobby frame is sufficient.  The
             # OCR process can briefly alternate between ``lobby`` and
@@ -264,6 +270,45 @@ class LiveLifecycle:
                 self.log('lobby_ready', mode='continuous',
                          evidence='visible_battle_button', samples=stable)
                 return
+            if kind == 'unknown' and unknown_samples >= 2:
+                # OCR can miss the lobby labels while the native probe is
+                # already back in the menu. This is safe because an active
+                # battle is explicitly rejected; only a non-battle frame
+                # without a result payload is accepted as an idle lobby.
+                probe = getattr(self, 'probe', None)
+                query = getattr(probe, 'query', None)
+                if callable(query):
+                    try:
+                        runtime = query()
+                    except Exception as exc:  # probe is diagnostic here
+                        self.log('lobby_probe_error', error=str(exc))
+                    else:
+                        if isinstance(runtime, dict):
+                            if runtime.get('in_battle') is True:
+                                raise LifecycleError(
+                                    'Active battle detected while screen is unknown; '
+                                    'use attach-active instead of starting a new battle'
+                                )
+                            if (runtime.get('in_battle') is False
+                                    and not runtime.get('battle_result')):
+                                self.log(
+                                    'lobby_ready', mode='continuous',
+                                    evidence='probe_idle_unknown_screen',
+                                    samples=unknown_samples)
+                                return
+                # If the probe says this is not an active battle but exposes
+                # a terminal/result payload, dismiss the configured result
+                # control once even when OCR cannot read its label. A second
+                # tap is never sent without fresh screen evidence.
+                if (unknown_recovery_taps == 0 and taps == 0
+                        and self.calibration.get('continue_button') is not None):
+                    self._tap(self.calibration['continue_button'],
+                              'unknown-result-dismiss')
+                    unknown_recovery_taps = 1
+                    previous, stable = None, 0
+                    unknown_samples = 0
+                    time.sleep(1)
+                    continue
             if kind == 'ok' and stable >= 2:
                 unknown_after_result = 0
                 if taps >= 3:
@@ -294,4 +339,3 @@ class LiveLifecycle:
                         continue
                 time.sleep(max(.25, self.poll_interval))
         raise LifecycleError('Lobby not visually confirmed before timeout')
-

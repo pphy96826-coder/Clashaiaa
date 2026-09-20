@@ -114,6 +114,44 @@ class LifecycleTests(unittest.TestCase):
                 lifecycle.return_to_lobby()
         lifecycle._tap.assert_not_called()
 
+    def test_unknown_screen_accepts_probe_confirmed_idle_lobby(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': False,
+        }))
+        lifecycle.calibration = {}
+        lifecycle._tap = Mock()
+        with patch('bridge.lifecycle_screen.read_screen',
+                   return_value=('unknown', None)), \
+                patch('live_lifecycle.time.sleep'):
+            lifecycle.return_to_lobby(timeout_seconds=5)
+        lifecycle._tap.assert_not_called()
+        self.assertIn(
+            call('lobby_ready', mode='continuous',
+                 evidence='probe_idle_unknown_screen', samples=2),
+            lifecycle.log.call_args_list)
+
+    def test_unknown_result_gets_one_configured_recovery_tap(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.post_result_delay = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': False,
+            'battle_result': {'finalized': True},
+        }))
+        lifecycle.calibration = {'continue_button': (540, 1710)}
+        lifecycle._tap = Mock()
+        with patch('bridge.lifecycle_screen.read_screen', side_effect=[
+                ('unknown', None), ('unknown', None),
+                ('lobby', (540, 1490)), ('lobby', (540, 1490))]), \
+                patch('live_lifecycle.time.sleep'):
+            lifecycle.return_to_lobby(timeout_seconds=5)
+        lifecycle._tap.assert_called_once_with(
+            (540, 1710), 'unknown-result-dismiss')
+
     def test_screen_reader_rejects_active_battle_and_reward_claims(self):
         from bridge.lifecycle_screen import classify
         row = {'confidence':1, 'x':.5, 'y':.92}
