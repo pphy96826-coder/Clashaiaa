@@ -2245,6 +2245,48 @@ class AdapterTests(unittest.TestCase):
             (26000014, 27000000, 28000000),
         )
 
+    def test_neutral_overflow_does_not_force_hog_into_live_building(self):
+        raw = opening()
+        hand = (
+            26000021,  # Hog Rider
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'neutral-overflow-live-building')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9336, 9000, 22000,
+            card_id=27000000, hp=800,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'neutral',
+        )
+        self.assertGreater(
+            o.action_mask.reasons['active_enemy_building_count'],
+            0,
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertIsNone(
+            a.neutral_overflow_fallback(s, o)
+        )
+
     def test_neutral_overflow_fallback_stays_off_below_soft_cap(self):
         a, s = self.adapter()
         s.elixir = 9.0

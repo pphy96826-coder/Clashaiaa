@@ -1995,6 +1995,12 @@ class FeatureAdapter:
             ):
                 continue
 
+            if (
+                cid == HOG_RIDER
+                and int(reasons.get('active_enemy_building_count') or 0) > 0
+            ):
+                continue
+
             entry = mask.placement_masks.get(str(slot))
 
             if not isinstance(entry, Mapping):
@@ -3370,6 +3376,7 @@ class FeatureAdapter:
                             for slot, cid in slots.items()
                             if playable[slot]
                             and cid == HOG_RIDER
+                            and not self._active_enemy_buildings
                         )
 
                         if (
