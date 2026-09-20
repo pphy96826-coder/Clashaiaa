@@ -117,7 +117,7 @@ SINGLE_RANGED_SUPPORT_MIN_COST = 2.0
 SINGLE_RANGED_SUPPORT_MAX_COST = 4.0
 SINGLE_RANGED_SUPPORT_MIN_RANGE_TILES = 2.0
 SINGLE_RANGED_SUPPORT_PRIMARY_RESPONSES = frozenset((
-    MUSKETEER, ICE_GOLEM, SKELETONS, ICE_SPIRIT, THE_LOG,
+    MUSKETEER,
 ))
 SINGLE_RANGED_SUPPORT_HELD_CARDS = frozenset((
     CANNON, FIREBALL,
@@ -1761,23 +1761,24 @@ class FeatureAdapter:
             if depth > 14500.0:
                 continue
 
-            cost = float(spec.elixir_cost)
-            attack_range = getattr(spec, 'range_tiles', None)
-            if (
-                cost < SINGLE_RANGED_SUPPORT_MIN_COST
-                or cost > SINGLE_RANGED_SUPPORT_MAX_COST
-                or not isinstance(attack_range, (int, float))
-                or float(attack_range)
-                    < SINGLE_RANGED_SUPPORT_MIN_RANGE_TILES
-            ):
-                continue
-
-            local.append((ent, depth, cost, float(attack_range)))
+            local.append((ent, depth, spec))
 
         if len(local) != 1:
             return None
 
-        ent, depth, cost, attack_range = local[0]
+        ent, depth, spec = local[0]
+        cost = float(spec.elixir_cost)
+        attack_range = getattr(spec, 'range_tiles', None)
+        if (
+            cost < SINGLE_RANGED_SUPPORT_MIN_COST
+            or cost > SINGLE_RANGED_SUPPORT_MAX_COST
+            or not isinstance(attack_range, (int, float))
+            or float(attack_range)
+                < SINGLE_RANGED_SUPPORT_MIN_RANGE_TILES
+        ):
+            return None
+
+        attack_range = float(attack_range)
         lane = 'left' if float(ent['x']) < 9000.0 else 'right'
 
         cover = []
@@ -2283,14 +2284,22 @@ class FeatureAdapter:
                 SKELETONS: 2,
             }
 
-        elif mode in ('cycle_then_prebuild', 'backfield_cycle'):
+        elif mode == 'cycle_then_prebuild':
             priority = {
                 ICE_SPIRIT: 0,
                 SKELETONS: 1,
                 THE_LOG: 2,
-                HOG_RIDER: 3,
-                CANNON: 4,
-                MUSKETEER: 5,
+                CANNON: 3,
+                HOG_RIDER: 4,
+            }
+
+        elif mode == 'backfield_cycle':
+            priority = {
+                ICE_SPIRIT: 0,
+                SKELETONS: 1,
+                HOG_RIDER: 2,
+                THE_LOG: 3,
+                MUSKETEER: 4,
             }
 
         elif mode == 'cannon_prebuild':
