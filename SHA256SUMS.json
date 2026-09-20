@@ -114,7 +114,7 @@
   "tests/test_inspect_players.py": "fb35d7c72fad1a6bc5d6964df8bcdc69896141c9be89ec3cdaf0b370b4550092",
   "tests/test_launch_profiles.py": "dae81d0d6484317b04f3b47aed0301d0919810919f8a6e2bd29a17dcd88951ba",
   "tests/test_observation_profiles.py": "293e4726d7981b8223349180f1bd675047ba5e52f6e9216ca7928010d9e719bf",
-  "tests/test_pipeline.py": "696c30a45f2f6c4790a8f0c8396c3ad154cea2012376301b2224cda891ad4a2c",
+  "tests/test_pipeline.py": "e5de576d0d0372b2d17bcf95b0d676fba928398efe01ee307f919d135b889f7a",
   "tests/test_profile_comparison.py": "38f7db174e60c659abdff3600d96fb5a6062b1fe92527faac1106c30c9812f72",
   "tests/test_projectile_origin.py": "794d037320ac532cf0c384348fada15c81a4991072cf830bc676ffdbd7b45940",
   "tests/test_reconnect_lifecycle.py": "99bf13a982c89b6a4f3fac08aa6d35e81c668b5b7b07cdb533c0b5a462401f8a",

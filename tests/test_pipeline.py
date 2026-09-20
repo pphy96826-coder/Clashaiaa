@@ -913,7 +913,11 @@ class AdapterTests(unittest.TestCase):
         _, o = a.tensorize(s)
 
         self.assertTrue(
+            o.action_mask.reasons['backfield_commitment_active'])
+        self.assertFalse(
             o.action_mask.reasons['backfield_patience_active'])
+        self.assertTrue(
+            o.action_mask.reasons['backfield_commitment_advisory'])
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertEqual(
             o.action_mask.reasons['slot_reasons']['0'],
