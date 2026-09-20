@@ -134,6 +134,16 @@ SINGLE_RANGED_SUPPORT_COVER_CARDS = frozenset((
 ))
 DEFENSIVE_FIREBALL_TARGET_RADIUS = 4500.0
 
+# Threat-to-counter allocation.  Groups are independent defensive jobs rather
+# than one shared lane budget; core counters are reserved only when their
+# matchup advantage is meaningfully better than the alternatives.
+THREAT_GROUP_JOIN_RADIUS = 5200.0
+COUNTER_ASSIGNMENT_MIN_SCORE = 0.25
+COUNTER_ASSIGNMENT_RESERVE_MARGIN = 1.5
+COUNTER_ASSIGNMENT_CORE_CARDS = frozenset((
+    CANNON, MUSKETEER, FIREBALL, ICE_GOLEM,
+))
+
 # Cannon may be placed before the tank reaches its final pull radius, provided
 # the observed approach says the tank should arrive while the building still
 # has useful lifetime.  Nine seconds is intentionally conservative; the
@@ -1797,6 +1807,324 @@ class FeatureAdapter:
             'balance_estimate': estimate,
         }
 
+    @staticmethod
+    def _threat_source_token(source_key):
+        return ':'.join(str(part) for part in source_key)
+
+    def _defensive_threat_groups(self):
+        """Cluster live enemy plays into independent defensive jobs.
+
+        Different lanes never share a group.  Within one lane, nearby bodies
+        or bodies from the same native deployment root are connected.  Attack
+        cost is counted once per source play, so swarm children do not inflate
+        the budget.
+        """
+        rows = []
+        for eid, ent in self._live_entities.items():
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+            hp = ent.get('hp')
+            cid = ent.get('card_id')
+            x, y = ent.get('x'), ent.get('y')
+            if (
+                not isinstance(eid, int)
+                or not isinstance(cid, int)
+                or cid <= 0
+                or not isinstance(hp, (int, float))
+                or float(hp) <= 0.0
+                or not isinstance(x, (int, float))
+                or not isinstance(y, (int, float))
+                or self._defensive_depth(y) > 16000.0
+            ):
+                continue
+            spec = self.bundle.card_specs.get(int(cid))
+            if spec is None or spec.kind.value not in ('troop', 'building'):
+                continue
+            source_cid = self._board_value_source(ent)
+            if source_cid is None:
+                continue
+            source_key = self._board_value_group_key(
+                int(eid), ent, int(source_cid))
+            rows.append({
+                'entity_id': int(eid),
+                'card_id': int(cid),
+                'source_card_id': int(source_cid),
+                'source_key': source_key,
+                'cost': float(
+                    self.bundle.card_specs[int(source_cid)].elixir_cost),
+                'lane': 'left' if float(x) < 9000.0 else 'right',
+                'x': float(x),
+                'y': float(y),
+                'depth': float(self._defensive_depth(y)),
+                'range_tiles': float(
+                    getattr(spec, 'range_tiles', 0.0) or 0.0),
+            })
+
+        if not rows:
+            return ()
+
+        parent = list(range(len(rows)))
+
+        def root(index):
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(a, b):
+            ra, rb = root(a), root(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        radius_sq = THREAT_GROUP_JOIN_RADIUS ** 2
+        for i, left in enumerate(rows):
+            for j in range(i + 1, len(rows)):
+                right = rows[j]
+                if left['lane'] != right['lane']:
+                    continue
+                same_source = left['source_key'] == right['source_key']
+                near = (
+                    (left['x'] - right['x']) ** 2
+                    + (left['y'] - right['y']) ** 2
+                    <= radius_sq
+                )
+                if same_source or near:
+                    union(i, j)
+
+        components = {}
+        for index, row in enumerate(rows):
+            components.setdefault(root(index), []).append(row)
+
+        groups = []
+        for members in components.values():
+            source_costs = {}
+            for row in members:
+                source_costs[row['source_key']] = max(
+                    source_costs.get(row['source_key'], 0.0),
+                    row['cost'],
+                )
+            source_tokens = sorted(
+                self._threat_source_token(key)
+                for key in source_costs
+            )
+            lane = members[0]['lane']
+            attack_cost = sum(source_costs.values())
+            anchor_x = sum(row['x'] for row in members) / len(members)
+            anchor_y = sum(row['y'] for row in members) / len(members)
+            card_ids = tuple(sorted({
+                int(row['source_card_id']) for row in members
+            }))
+            ranged_support_count = sum(
+                1 for key in source_costs
+                if any(
+                    row['source_key'] == key
+                    and row['range_tiles'] >= 2.0
+                    for row in members
+                )
+            )
+            group_id = (
+                f"{lane}|"
+                + '|'.join(source_tokens)
+            )
+            groups.append({
+                'group_id': group_id,
+                'lane': lane,
+                'entity_ids': tuple(sorted(
+                    row['entity_id'] for row in members)),
+                'card_ids': card_ids,
+                'attack_cost': float(attack_cost),
+                'anchor_x': float(anchor_x),
+                'anchor_y': float(anchor_y),
+                'min_depth': min(row['depth'] for row in members),
+                'max_card_cost': max(row['cost'] for row in members),
+                'ranged_support_count': int(ranged_support_count),
+                'source_count': len(source_costs),
+                'has_hog': HOG_RIDER in card_ids,
+            })
+
+        return tuple(sorted(
+            groups,
+            key=lambda group: (
+                group['min_depth'],
+                -group['attack_cost'],
+                group['lane'],
+                group['group_id'],
+            ),
+        ))
+
+    def _counter_matchup_score(self, card_id, group):
+        spec = self.bundle.card_specs.get(int(card_id))
+        if spec is None or int(card_id) == HOG_RIDER:
+            return -100.0
+
+        cost = float(spec.elixir_cost)
+        attack_cost = float(group['attack_cost'])
+        ranged = int(group['ranged_support_count'])
+        score = 0.6 * (attack_cost - cost)
+
+        if int(card_id) == CANNON:
+            if group['has_hog']:
+                score += 8.0
+            elif float(group['max_card_cost']) >= 5.0:
+                score += 4.0
+            elif ranged and int(group['source_count']) == 1:
+                score -= 5.0
+            else:
+                score += 0.5
+        elif int(card_id) == MUSKETEER:
+            if ranged:
+                score += 3.0
+            if attack_cost >= 4.0:
+                score += 2.0
+            if group['has_hog']:
+                score += 1.5
+        elif int(card_id) == FIREBALL:
+            if ranged >= 2:
+                score += 5.0
+            elif ranged == 1 and attack_cost >= 4.0:
+                score += 2.0
+            if int(group['source_count']) == 1 and attack_cost <= 4.0:
+                score -= 5.0
+            elif attack_cost >= 7.0:
+                score += 1.0
+        elif int(card_id) == SKELETONS:
+            score += 1.0 if group['has_hog'] else 0.0
+            score += 2.5 if attack_cost <= 4.0 and not ranged else -1.5
+        elif int(card_id) == ICE_SPIRIT:
+            score += 2.0 if attack_cost <= 4.0 else 1.2
+            if group['has_hog']:
+                score += 0.5
+        elif int(card_id) == ICE_GOLEM:
+            score += 2.0 if ranged else 0.5
+        elif int(card_id) == THE_LOG:
+            score += 2.0 if attack_cost <= 3.0 else -1.0
+            if ranged:
+                score -= 1.0
+
+        # Slight urgency preference lets global assignment cover the threat
+        # closest to our tower when two matchups are otherwise equivalent.
+        score += max(
+            0.0,
+            (16000.0 - float(group['min_depth'])) / 16000.0,
+        )
+        return float(score)
+
+    def _counter_assignment_context(
+            self, slots, effective_elixir, blocked_slots=()):
+        groups = self._defensive_threat_groups()
+        if not groups:
+            return {
+                'groups': (),
+                'assignments': (),
+                'reserved_counter_cards': {},
+                'primary': None,
+            }
+
+        blocked = {int(slot) for slot in blocked_slots}
+        candidates = []
+        for slot, cid in slots.items():
+            slot, cid = int(slot), int(cid)
+            spec = self.bundle.card_specs.get(cid)
+            if (
+                slot in blocked
+                or spec is None
+                or float(spec.elixir_cost) > float(effective_elixir)
+                or cid == HOG_RIDER
+            ):
+                continue
+            candidates.append((slot, cid, float(spec.elixir_cost)))
+
+        score_by_pair = {}
+        for gi, group in enumerate(groups):
+            for slot, cid, cost in candidates:
+                score_by_pair[(gi, slot)] = (
+                    self._counter_matchup_score(cid, group),
+                    cid,
+                    cost,
+                )
+
+        best_total = 0.0
+        best_rows = []
+
+        def search(group_index, used_slots, total, chosen):
+            nonlocal best_total, best_rows
+            if group_index >= len(groups):
+                if total > best_total:
+                    best_total = total
+                    best_rows = list(chosen)
+                return
+            search(
+                group_index + 1,
+                used_slots,
+                total,
+                chosen,
+            )
+            for slot, cid, cost in candidates:
+                if slot in used_slots:
+                    continue
+                score = score_by_pair[(group_index, slot)][0]
+                if score < COUNTER_ASSIGNMENT_MIN_SCORE:
+                    continue
+                chosen.append((
+                    group_index, slot, cid, cost, score))
+                search(
+                    group_index + 1,
+                    used_slots | {slot},
+                    total + score,
+                    chosen,
+                )
+                chosen.pop()
+
+        search(0, set(), 0.0, [])
+
+        assignments = []
+        reserved = {}
+        for gi, slot, cid, cost, score in best_rows:
+            group = groups[gi]
+            alternatives = sorted(
+                (
+                    score_by_pair[(gi, other_slot)][0]
+                    for other_slot, other_cid, _ in candidates
+                    if other_slot != slot
+                ),
+                reverse=True,
+            )
+            next_best = alternatives[0] if alternatives else -100.0
+            margin = float(score - next_best)
+            assignment = {
+                'threat_group_id': group['group_id'],
+                'threat_group_lane': group['lane'],
+                'threat_group_attack_cost': group['attack_cost'],
+                'card_id': int(cid),
+                'slot': int(slot),
+                'cost': float(cost),
+                'score': round(float(score), 3),
+                'scarcity_margin': round(margin, 3),
+                'anchor_x': group['anchor_x'],
+                'anchor_y': group['anchor_y'],
+            }
+            assignments.append(assignment)
+            if (
+                int(cid) in COUNTER_ASSIGNMENT_CORE_CARDS
+                and margin >= COUNTER_ASSIGNMENT_RESERVE_MARGIN
+            ):
+                reserved[int(cid)] = assignment
+
+        by_group = {
+            row['threat_group_id']: row
+            for row in assignments
+        }
+        primary = (
+            by_group.get(groups[0]['group_id'])
+            if groups else None
+        )
+        return {
+            'groups': groups,
+            'assignments': tuple(assignments),
+            'reserved_counter_cards': reserved,
+            'primary': primary,
+        }
+
     def _has_defensive_pressure(self):
         """Whether any live enemy is already in our central/defensive half.
 
@@ -3346,6 +3674,33 @@ class FeatureAdapter:
         hog_opportunity_lane = (
             attack_opportunity.get('lane') if attack_opportunity else None
         )
+        counter_plan = self._counter_assignment_context(
+            slots,
+            elixir,
+            blocked_slots=blocked_slots,
+        )
+        threat_groups = counter_plan['groups']
+        counter_assignments = counter_plan['assignments']
+        reserved_counter_cards = counter_plan[
+            'reserved_counter_cards']
+        primary_counter_assignment = counter_plan['primary']
+
+        self.quality['threat_groups'] = [
+            {
+                'threat_group_id': group['group_id'],
+                'lane': group['lane'],
+                'card_ids': list(group['card_ids']),
+                'attack_cost': round(group['attack_cost'], 2),
+                'min_depth': round(group['min_depth'], 1),
+            }
+            for group in threat_groups
+        ]
+        self.quality['counter_assignments'] = list(
+            counter_assignments)
+        self.quality['reserved_counter_cards'] = {
+            str(cid): row['threat_group_id']
+            for cid, row in reserved_counter_cards.items()
+        }
         self.quality['strategy_phase'] = strategy_phase
         self.quality['resource_posture'] = resource_posture
         self.quality['resource_own_board_value'] = round(
@@ -3833,6 +4188,33 @@ class FeatureAdapter:
                     ):
                         entry = self._mask_hog_behind_ice_golem(
                             entry, counterpush)
+
+            assigned_counter = reserved_counter_cards.get(int(cid))
+            if (
+                assigned_counter is not None
+                and incoming_push is None
+            ):
+                if int(cid) in DEFENSIVE_LANE_CARDS:
+                    entry = self._mask_to_lane(
+                        entry,
+                        assigned_counter['threat_group_lane'],
+                        'counter_assignment_lane',
+                    )
+                elif int(cid) == FIREBALL:
+                    entry = self._mask_spell_near_point(
+                        entry,
+                        assigned_counter['anchor_x'],
+                        assigned_counter['anchor_y'],
+                        DEFENSIVE_FIREBALL_TARGET_RADIUS,
+                        'counter_assignment',
+                    )
+                entry['counter_assignment_group_id'] = (
+                    assigned_counter['threat_group_id'])
+                entry['counter_assignment_score'] = (
+                    assigned_counter['score'])
+                entry['counter_assignment_scarcity_margin'] = (
+                    assigned_counter['scarcity_margin'])
+
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
@@ -4097,6 +4479,41 @@ class FeatureAdapter:
                      'attack_hold_enemy_id': (
                          attack_hold['enemy_id'] if attack_hold else None),
                      'strategy_phase': strategy_phase,
+                     'threat_groups': [
+                         {
+                             'threat_group_id': group['group_id'],
+                             'lane': group['lane'],
+                             'card_ids': list(group['card_ids']),
+                             'attack_cost': round(
+                                 group['attack_cost'], 2),
+                             'min_depth': round(
+                                 group['min_depth'], 1),
+                         }
+                         for group in threat_groups
+                     ],
+                     'counter_assignments': list(
+                         counter_assignments),
+                     'reserved_counter_cards': {
+                         str(cid): row['threat_group_id']
+                         for cid, row in reserved_counter_cards.items()
+                     },
+                     'threat_group_id': (
+                         primary_counter_assignment[
+                             'threat_group_id']
+                         if primary_counter_assignment else None),
+                     'threat_group_attack_cost': (
+                         primary_counter_assignment[
+                             'threat_group_attack_cost']
+                         if primary_counter_assignment else None),
+                     'counter_assignment_card_id': (
+                         primary_counter_assignment['card_id']
+                         if primary_counter_assignment else None),
+                     'counter_assignment_cost': (
+                         primary_counter_assignment['cost']
+                         if primary_counter_assignment else None),
+                     'counter_assignment_score': (
+                         primary_counter_assignment['score']
+                         if primary_counter_assignment else None),
                      'backfield_commitment_active': (
                          backfield_commitment is not None),
                      'backfield_commitment_lane': (
