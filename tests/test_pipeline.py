@@ -2168,17 +2168,24 @@ class AdapterTests(unittest.TestCase):
             if cid not in hand
         ]
         raw['players'][0]['elixir'] = 7.0
+        costs = {
+            26000010: 1,
+            26000014: 4,
+            26000021: 4,
+            26000030: 1,
+            26000038: 2,
+            27000000: 3,
+            28000000: 4,
+            28000011: 2,
+        }
         raw['players'][0]['card_runtime'] = [
             {
+                'deck_slot': deck_slot,
                 'card_id': cid,
                 'active_form': 1 if cid == 26000010 else 0,
-                'selected_cost': (
-                    1 if cid == 26000010
-                    else 4 if cid in (26000021, 26000014, 28000000)
-                    else 0
-                ),
+                'selected_cost': costs[cid],
             }
-            for cid in HOG_26_DECK
+            for deck_slot, cid in enumerate(HOG_26_DECK)
         ]
 
         s = ProbeClient(account_id=123).parse(raw)
