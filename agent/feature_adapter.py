@@ -58,6 +58,9 @@ LOW_ELIXIR_ATTACK_MAX_UPPER = 4.0
 LOW_ELIXIR_ATTACK_MAX_WIDTH = 1.0
 COUNTERPUSH_MIN_PROGRESS = 9000.0
 COUNTERPUSH_MAX_PROGRESS = 17000.0
+COUNTERPUSH_ICE_GOLEM_HOG_MIN_TRAIL = 500.0
+COUNTERPUSH_ICE_GOLEM_HOG_MAX_TRAIL = 2500.0
+COUNTERPUSH_ICE_GOLEM_HOG_MAX_LATERAL = 1500.0
 INCOMING_PUSH_MIN_COST = 5.0
 INCOMING_PUSH_BACKFIELD_DEPTH = 22000.0
 INCOMING_PUSH_DEFENDER_RELEASE_DEPTH = 18000.0
@@ -1634,6 +1637,8 @@ class FeatureAdapter:
                 'lane': lane,
                 'entity_id': int(ent['id']),
                 'card_id': card_id,
+                'x': float(x),
+                'y': float(y),
                 'progress': progress,
                 'hp_fraction': hp_fraction,
             })
@@ -1648,6 +1653,8 @@ class FeatureAdapter:
             'lane': best['lane'],
             'support_entity_id': best['entity_id'],
             'support_card_id': best['card_id'],
+            'support_x': best['x'],
+            'support_y': best['y'],
             'support_progress': best['progress'],
             'support_hp_fraction': best['hp_fraction'],
         }
@@ -1845,6 +1852,48 @@ class FeatureAdapter:
         masked = dict(entry)
         masked['row_major'] = rows
         masked[metadata_key] = lane
+        return masked
+
+    def _mask_hog_behind_ice_golem(self, entry, counterpush):
+        """Keep counterpush Hog close behind a same-lane Ice Golem.
+
+        This is purely a placement rule, not a timing gate.  As soon as there
+        is a legal deployment cell behind the Ice Golem, Hog stays available.
+        The narrow trailing corridor makes Hog catch the body from behind and
+        push it forward instead of spawning beside/ahead and overtaking it.
+        """
+        masked = dict(entry)
+        support_x = float(counterpush['support_x'])
+        support_progress = float(counterpush['support_progress'])
+        subcell = masked.get('model_subcell_offset') or (0.0, 0.0)
+        dx, dy = float(subcell[0] or 0.0), float(subcell[1] or 0.0)
+        sign = 1.0 if self.actor_owner == 0 else -1.0
+        rows = []
+        for gy, row in enumerate(masked['row_major']):
+            out = []
+            for gx, allowed in enumerate(row):
+                world_x = (float(gx) + 0.5 + sign * dx) * 1000.0
+                world_y = (float(gy) + 0.5 + sign * dy) * 1000.0
+                progress = self._defensive_depth(world_y)
+                trail = support_progress - progress
+                out.append(
+                    bool(allowed)
+                    and COUNTERPUSH_ICE_GOLEM_HOG_MIN_TRAIL
+                        <= trail
+                        <= COUNTERPUSH_ICE_GOLEM_HOG_MAX_TRAIL
+                    and abs(world_x - support_x)
+                        <= COUNTERPUSH_ICE_GOLEM_HOG_MAX_LATERAL
+                )
+            rows.append(tuple(out))
+        masked['row_major'] = tuple(rows)
+        masked['counterpush_ice_golem_support_x'] = support_x
+        masked['counterpush_ice_golem_support_progress'] = support_progress
+        masked['counterpush_hog_min_trail'] = (
+            COUNTERPUSH_ICE_GOLEM_HOG_MIN_TRAIL)
+        masked['counterpush_hog_max_trail'] = (
+            COUNTERPUSH_ICE_GOLEM_HOG_MAX_TRAIL)
+        masked['counterpush_hog_max_lateral'] = (
+            COUNTERPUSH_ICE_GOLEM_HOG_MAX_LATERAL)
         return masked
 
     @classmethod
@@ -3579,6 +3628,13 @@ class FeatureAdapter:
                     # Preserve the older placement-mask diagnostic while the
                     # unified context becomes the single source of truth.
                     entry['counterpush_lane'] = hog_opportunity_lane
+                    if (
+                        counterpush is not None
+                        and int(counterpush.get('support_card_id') or 0)
+                            == ICE_GOLEM
+                    ):
+                        entry = self._mask_hog_behind_ice_golem(
+                            entry, counterpush)
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:

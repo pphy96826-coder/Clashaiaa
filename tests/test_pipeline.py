@@ -2263,6 +2263,87 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
 
+    def test_ice_golem_counterpush_places_hog_close_behind_body(self):
+        a, s = self.adapter()
+        s.elixir = 5.0
+        s.entities.append({
+            'id': 9207,
+            'owner': s.local_owner,
+            'card_id': 26000038,
+            'x': 14500,
+            'y': 12000,
+            'hp': 800,
+            'max_hp': 1200,
+        })
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'counterpush',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['counterpush_support_card_id'],
+            26000038,
+        )
+        # No artificial progress/timing hold: Hog is immediately playable
+        # whenever a legal trailing cell exists.
+        self.assertTrue(o.action_mask.hand_slots[2])
+
+        hog = o.action_mask.placement_masks['2']
+        self.assertEqual(hog['counterpush_lane'], 'right')
+        self.assertEqual(
+            hog['counterpush_ice_golem_support_progress'],
+            12000.0,
+        )
+
+        subcell = hog.get('model_subcell_offset') or (0.0, 0.0)
+        dx, dy = subcell
+        allowed = []
+        for gy, row in enumerate(hog['row_major']):
+            for gx, ok in enumerate(row):
+                if not ok:
+                    continue
+                world_x = (gx + 0.5 + dx) * 1000.0
+                world_y = (gy + 0.5 + dy) * 1000.0
+                allowed.append((world_x, world_y))
+
+        self.assertTrue(allowed)
+        for world_x, world_y in allowed:
+            trail = 12000.0 - world_y
+            self.assertGreaterEqual(trail, 500.0)
+            self.assertLessEqual(trail, 2500.0)
+            self.assertLessEqual(abs(world_x - 14500.0), 1500.0)
+
+    def test_musketeer_counterpush_does_not_use_ice_golem_trailing_corridor(self):
+        a, s = self.adapter()
+        s.elixir = 5.0
+        s.entities.append({
+            'id': 9208,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 14500,
+            'y': 12000,
+            'hp': 700,
+            'max_hp': 1000,
+        })
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        hog = o.action_mask.placement_masks['2']
+        self.assertEqual(hog['counterpush_lane'], 'right')
+        self.assertNotIn(
+            'counterpush_ice_golem_support_progress',
+            hog,
+        )
+        self.assertTrue(any(
+            row[x]
+            for row in hog['row_major']
+            for x in range(9, 18)
+        ))
+
     def test_counterpush_opportunity_hides_lower_priority_attack_window(self):
         a, s = self.adapter()
         s.elixir = 5.0
