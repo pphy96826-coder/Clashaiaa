@@ -16,3 +16,4 @@ backups/
 probe/*.so
 probe/artifacts/candidates/
 probe/artifacts/validation-*/
+.DS_Store
