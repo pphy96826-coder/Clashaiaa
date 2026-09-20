@@ -781,7 +781,7 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(o.action_mask.hand_slots[2])
         self.assertFalse(o.action_mask.hand_slots[3])
 
-    def test_prepare_defense_hard_cap_uses_same_lane_ice_golem_fallback(self):
+    def test_prepare_defense_hard_cap_keeps_ice_golem_until_release_depth(self):
         raw = opening()
 
         hand = (
@@ -802,8 +802,7 @@ class AdapterTests(unittest.TestCase):
 
         s = ProbeClient(account_id=123).parse(raw)
         a = FeatureAdapter()
-        a.reset_match(s, 'prepare-overflow-body-fallback')
-
+        a.reset_match(s, 'prepare-overflow-body-held')
         s.elixir = 10.0
 
         add_enemy(
@@ -815,50 +814,24 @@ class AdapterTests(unittest.TestCase):
         _, o = a.tensorize(s)
 
         self.assertTrue(
-            o.action_mask.reasons[
-                'defense_overflow_hard_cap'])
-        self.assertTrue(
-            o.action_mask.reasons[
-                'defense_overflow_forced'])
+            o.action_mask.reasons['defense_overflow_hard_cap'])
+        self.assertFalse(
+            o.action_mask.reasons['defense_overflow_forced'])
         self.assertEqual(
-            o.action_mask.reasons[
-                'defense_overflow_mode'],
-            'ice_golem_body',
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (),
         )
+        self.assertTrue(o.action_mask.kinds['wait'])
 
-        self.assertTrue(
-            o.action_mask.kinds['wait'])
-
-        # No one-elixir cycle/Hog is available.  Spend two on a same-lane
-        # staged body rather than pre-Cannon or opposite-lane Musketeer.
-        self.assertEqual(
-            o.action_mask.reasons[
-                'defense_overflow_safe_slots'],
-            (3,),
-        )
-
-        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertTrue(o.action_mask.hand_slots[0])
         self.assertFalse(o.action_mask.hand_slots[1])
         self.assertFalse(o.action_mask.hand_slots[2])
-        self.assertTrue(o.action_mask.hand_slots[3])
-
-        ice_golem = o.action_mask.placement_masks['3']
-
-        self.assertTrue(
-            any(
-                row[x]
-                for row in ice_golem['row_major']
-                for x in range(0, 9)
-            )
+        self.assertFalse(o.action_mask.hand_slots[3])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['3'],
+            'strategy_hold_ice_golem_for_incoming_push',
         )
 
-        self.assertFalse(
-            any(
-                row[x]
-                for row in ice_golem['row_major']
-                for x in range(9, 18)
-            )
-        )
 
     def test_single_one_elixir_threat_holds_core_defense(self):
         raw = opening()

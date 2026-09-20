@@ -3181,7 +3181,6 @@ class FeatureAdapter:
                 and cid == ICE_GOLEM
                 and heavy_core_depth
                     > HEAVY_DEFEND_BODY_RELEASE_DEPTH
-                and not defense_overflow_hard_cap
             ):
                 slot_reasons[str(slot)] = (
                     'strategy_hold_ice_golem_for_incoming_push'
@@ -3408,23 +3407,6 @@ class FeatureAdapter:
                                 'heavy_commit_hog_punish'
                             )
 
-                        elif (
-                            defense_overflow_hard_cap
-                            and incoming_push is not None
-                        ):
-                            body_slots = [
-                                slot
-                                for slot, cid in slots.items()
-                                if playable[slot]
-                                and cid == ICE_GOLEM
-                            ]
-
-                            if body_slots:
-                                defense_overflow_safe_slots = sorted(
-                                    body_slots)
-                                defense_overflow_mode = (
-                                    'ice_golem_body'
-                                )
 
                 if defense_overflow_safe_slots:
                     # Generic backfield patience only needs a WAIT fallback;
