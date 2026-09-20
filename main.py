@@ -27,6 +27,19 @@ from bridge.live_replay_mirror import LiveReplayMirror, MirrorAction
 from bridge.coordinates import action_world
 
 
+ACTIVE_BATTLE_REATTACH_COOLDOWN_SECONDS = 0.75
+
+
+def _should_reattach_active_battle(identity, status):
+    """Treat a lone probe idle state as non-terminal while a match is active.
+
+    Native state.native_finalized is the authoritative terminal gate. A
+    transient UI overlay (for example the emote tray) may briefly make the
+    probe report idle even though the battle tick is still live.
+    """
+    return identity is not None and str(status or '').strip().lower() == 'idle'
+
+
 class CustomCardDeployAgent:
     def __init__(self, checkpoint_path=None, device_str='cuda:0', *, dry_run=False,
                  account_id=config.LOCAL_ACCOUNT_ID, owner=None, sample=False,
@@ -207,6 +220,7 @@ class CustomCardDeployAgent:
         last_prelock_fast_key = None
         last_prelock_diag_key = None
         last_prelock_conflict_key = None
+        last_active_reattach = 0.0
         match_count = 0
         lifecycle = None
         if continuous:
@@ -395,6 +409,43 @@ class CustomCardDeployAgent:
                 process_console_commands(state)
                 if state is None:
                     self.executor.poll(None, self._validate_action)
+
+                    # A transient UI overlay can briefly make the probe report
+                    # idle even though the battle itself is still active. Do
+                    # not demote an episode that already has an identity; the
+                    # native finalized contract below remains the only normal
+                    # terminal gate. Re-attaching is read-only and lets the
+                    # telemetry lane reacquire the same episode.
+                    if _should_reattach_active_battle(
+                            identity, self.probe.last_status):
+                        if (now - last_active_reattach
+                                >= ACTIVE_BATTLE_REATTACH_COOLDOWN_SECONDS):
+                            try:
+                                self.probe.attach_live_context()
+                                self.log(
+                                    'battle_idle_guard',
+                                    last_tick=last_seen_tick,
+                                    status=self.probe.last_status,
+                                    action='reattach_live_context',
+                                    telemetry_age_ms=round(
+                                        max(0.0, now - last_live) * 1000.0, 1),
+                                )
+                            except (OSError, RuntimeError, ValueError) as exc:
+                                self.log(
+                                    'battle_idle_guard_error',
+                                    last_tick=last_seen_tick,
+                                    status=self.probe.last_status,
+                                    error=str(exc),
+                                )
+                            last_active_reattach = now
+                        message = self.probe.last_error or self.probe.last_status
+                        if message != last_message:
+                            self.log('waiting', status=message,
+                                     guarded_active_battle=True)
+                            last_message = message
+                        time.sleep(.05)
+                        continue
+
                     if identity is not None and not suspended and now-last_live > config.STALE_SECONDS:
                         self.log('telemetry_paused', last_tick=last_seen_tick, status=self.probe.last_status)
                         self.executor.pause()
