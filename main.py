@@ -168,7 +168,12 @@ class CustomCardDeployAgent:
     def _validate_action(self, action, state):
         if state.native_finalized:
             return False
-        obs = self.adapter.build_observation(state)
+        obs = self.adapter.build_observation(
+            state,
+            self.executor.blocked_slots(state),
+            self.executor.reserved_elixir,
+            self.executor.blocked_abilities(),
+        )
         self.actuator.guard_hero_hud = self.adapter.quality.get('ability_hud_excluded', False)
         if action.kind.value == 'activate_ability':
             own = next(p for p in obs.players if p.owner == state.local_owner)

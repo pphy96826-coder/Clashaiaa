@@ -102,6 +102,41 @@ class RecoveryTests(unittest.TestCase):
         raw['battle_result']['validated'] = False
         self.assertFalse(state.native_finalized)
 
+    def test_live_validation_reuses_executor_resource_and_slot_context(self):
+        state = ProbeClient(account_id=123).parse(opening())
+
+        agent = CustomCardDeployAgent.__new__(CustomCardDeployAgent)
+        agent.adapter = Mock()
+        agent.adapter.build_observation.side_effect = RuntimeError('stop-after-call')
+        agent.executor = Mock()
+        agent.executor.blocked_slots.return_value = (1,)
+        agent.executor.reserved_elixir = 3.0
+        agent.executor.blocked_abilities.return_value = ('ability-lock',)
+        agent.actuator = Mock()
+
+        action = ActionV1(
+            owner=state.local_owner,
+            kind=ActionKind.PLAY_CARD,
+            hand_slot=0,
+            card_id=state.hand_cards[0],
+            target_kind=TargetKind.GRID,
+            target_grid=(3, 10),
+            metadata={
+                'policy_effective_cost': 1.0,
+                'policy_effective_form_code': 0,
+            },
+        )
+
+        with self.assertRaisesRegex(RuntimeError, 'stop-after-call'):
+            agent._validate_action(action, state)
+
+        agent.adapter.build_observation.assert_called_once_with(
+            state,
+            (1,),
+            3.0,
+            ('ability-lock',),
+        )
+
     def test_same_match_resumes_after_stall_with_a_destroyed_tower(self):
         parser = ProbeClient(account_id=123)
         raw = opening()
