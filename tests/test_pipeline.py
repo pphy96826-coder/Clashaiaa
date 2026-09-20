@@ -2877,7 +2877,7 @@ class AdapterTests(unittest.TestCase):
         a = FeatureAdapter()
         a.reset_match(s, 'resource-deficit-placement')
         add_enemy(s, 9396, 3500, 26000, card_id=26000014, hp=1000)
-        add_enemy(s, 9397, 14500, 26000, card_id=26000014, hp=1000)
+        add_enemy(s, 9397, 14500, 26000, card_id=26000021, hp=1000)
         s.tick += 1
 
         _, o = a.tensorize(s)

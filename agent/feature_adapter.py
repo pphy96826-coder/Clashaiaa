@@ -3322,13 +3322,11 @@ class FeatureAdapter:
         ]
         neutral_patience_relaxed_no_cycle = bool(
             strategy_phase == 'neutral'
-            and backfield_commitment is None
             and resource_posture == 'defend'
             and not neutral_patience_safe_slots
         )
         neutral_patience = (
             strategy_phase == 'neutral'
-            and backfield_commitment is None
             and resource_posture == 'defend'
             and bool(neutral_patience_safe_slots)
         )
