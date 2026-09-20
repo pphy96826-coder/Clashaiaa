@@ -29,6 +29,8 @@ class PendingAction:
     input_completed_at: float = 0.0
     threat_ids: frozenset = frozenset()
     threat_target: tuple[float, float] | None = None
+    threat_group_id: str | None = None
+    threat_group_lane: str | None = None
     ack_timeout_seconds: float = 0.0
     prior_cycle: tuple[int, ...] | None = None
     prior_raw_hand_card: int | None = None
@@ -58,6 +60,8 @@ class ThreatReservation:
     threat_anchor: tuple[float, float] | None = None
     defense_cost: float = 0.0
     attack_budget: float = 0.0
+    threat_group_id: str | None = None
+    threat_group_lane: str | None = None
 
 
 class ActionExecutor:
@@ -93,6 +97,9 @@ class ActionExecutor:
     # short render grace for unsupported/unknown-cost threats.
     THREAT_REACTION_HOLD_SECONDS = 0.12
     THREAT_BUDGET_RADIUS_WORLD = 6500.0
+    THREAT_GROUP_JOIN_RADIUS_WORLD = 5200.0
+    THREAT_GROUP_DEFENSE_RADIUS_WORLD = 4600.0
+    THREAT_GROUP_REBIND_RADIUS_WORLD = 5200.0
     THREAT_LARGE_PUSH_MARGIN_COST = 1.0
     # Residual threat must never be judged while the original card is still
     # awaiting its ACK outcome. Once that outcome arrives, start a new,
@@ -470,6 +477,224 @@ class ActionExecutor:
             int(source_card_id),
         )
 
+    @staticmethod
+    def _threat_group_lane(x):
+        return 'left' if float(x) < 9000.0 else 'right'
+
+    def _threat_group_rows(self, state, defending_owner):
+        rows = []
+        for entity in state.entities:
+            if int(entity.get('owner', -1)) == int(defending_owner):
+                continue
+            entity_id = entity.get('id')
+            card_id = entity.get('card_id')
+            hp = entity.get('hp')
+            x, y = entity.get('x'), entity.get('y')
+            if (
+                not isinstance(entity_id, int)
+                or entity_id <= 0
+                or not isinstance(card_id, int)
+                or card_id <= 0
+                or not isinstance(hp, (int, float))
+                or float(hp) <= 0.0
+                or not isinstance(x, (int, float))
+                or not isinstance(y, (int, float))
+                or not self._on_own_half(defending_owner, y)
+            ):
+                continue
+            source = self._entity_source_card_id(entity)
+            if source is None:
+                continue
+            origin = entity.get('deployment_origin')
+            root = None
+            if isinstance(origin, dict):
+                epoch = origin.get('epoch')
+                sequence = origin.get('sequence')
+                if isinstance(epoch, int) and isinstance(sequence, int):
+                    root = ('deployment', int(entity.get('owner', -1)),
+                            epoch, sequence)
+            rows.append({
+                'entity_id': int(entity_id),
+                'card_id': int(card_id),
+                'source_card_id': int(source),
+                'source_root': root,
+                'cost': self._card_cost(source),
+                'lane': self._threat_group_lane(x),
+                'x': float(x),
+                'y': float(y),
+            })
+        return rows
+
+    def _threat_groups(self, state, defending_owner):
+        rows = self._threat_group_rows(state, defending_owner)
+        if not rows:
+            return ()
+
+        parent = list(range(len(rows)))
+
+        def root(index):
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(a, b):
+            ra, rb = root(a), root(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        radius_sq = self.THREAT_GROUP_JOIN_RADIUS_WORLD ** 2
+        for i, left in enumerate(rows):
+            for j in range(i + 1, len(rows)):
+                right = rows[j]
+                if left['lane'] != right['lane']:
+                    continue
+                same_root = (
+                    left['source_root'] is not None
+                    and left['source_root'] == right['source_root']
+                )
+                near = (
+                    (left['x'] - right['x']) ** 2
+                    + (left['y'] - right['y']) ** 2
+                    <= radius_sq
+                )
+                if same_root or near:
+                    union(i, j)
+
+        components = {}
+        for index, row in enumerate(rows):
+            components.setdefault(root(index), []).append(row)
+
+        groups = []
+        for members in components.values():
+            lane = members[0]['lane']
+            source_costs = {}
+            # Native deployment roots are exact.  Without one, keep tightly
+            # packed same-card children as one source play; separated copies
+            # of the same card remain distinct.
+            unrooted = []
+            for row in members:
+                if row['source_root'] is not None:
+                    source_costs[row['source_root']] = max(
+                        source_costs.get(row['source_root'], 0.0),
+                        row['cost'],
+                    )
+                else:
+                    unrooted.append(row)
+
+            unrooted_parent = list(range(len(unrooted)))
+            def uroot(index):
+                while unrooted_parent[index] != index:
+                    unrooted_parent[index] = unrooted_parent[
+                        unrooted_parent[index]]
+                    index = unrooted_parent[index]
+                return index
+            def uunion(a, b):
+                ra, rb = uroot(a), uroot(b)
+                if ra != rb:
+                    unrooted_parent[rb] = ra
+
+            cohort_sq = self.THREAT_COHORT_RADIUS_WORLD ** 2
+            for i, left in enumerate(unrooted):
+                for j in range(i + 1, len(unrooted)):
+                    right = unrooted[j]
+                    if left['source_card_id'] != right['source_card_id']:
+                        continue
+                    if (
+                        (left['x'] - right['x']) ** 2
+                        + (left['y'] - right['y']) ** 2
+                        <= cohort_sq
+                    ):
+                        uunion(i, j)
+
+            for index, row in enumerate(unrooted):
+                key = (
+                    'observed',
+                    int(row['source_card_id']),
+                    int(uroot(index)),
+                )
+                source_costs[key] = max(
+                    source_costs.get(key, 0.0),
+                    row['cost'],
+                )
+
+            anchor_x = sum(row['x'] for row in members) / len(members)
+            anchor_y = sum(row['y'] for row in members) / len(members)
+            card_ids = frozenset(
+                int(row['source_card_id']) for row in members)
+            source_tokens = sorted(
+                ':'.join(str(part) for part in key)
+                for key in source_costs
+            )
+            # Exact roots give a stable id.  Fallback groups include a broad
+            # anchor bucket; matching also uses lane/card signature/anchor so
+            # a bucket boundary cannot merge unrelated reservations.
+            bucket_x = int(anchor_x // 4000.0)
+            bucket_y = int(anchor_y // 4000.0)
+            group_id = (
+                f"{lane}|{bucket_x}:{bucket_y}|"
+                + '|'.join(source_tokens)
+            )
+            groups.append({
+                'group_id': group_id,
+                'lane': lane,
+                'entity_ids': frozenset(
+                    int(row['entity_id']) for row in members),
+                'card_ids': card_ids,
+                'attack_cost': float(sum(source_costs.values())),
+                'anchor': (float(anchor_x), float(anchor_y)),
+            })
+        return tuple(groups)
+
+    def _threat_group_for_action(self, action, state):
+        if (
+            self.card_cost_resolver is None
+            or action.kind.value != 'play_card'
+            or action.target_grid is None
+        ):
+            return None
+        target = action_world(action)
+        if not self._on_own_half(action.owner, target[1]):
+            return None
+        groups = self._threat_groups(state, int(action.owner))
+        if not groups:
+            return None
+        radius_sq = self.THREAT_RESERVATION_RADIUS_WORLD ** 2
+        ranked = []
+        for group in groups:
+            ax, ay = group['anchor']
+            distance_sq = (
+                (ax - float(target[0])) ** 2
+                + (ay - float(target[1])) ** 2
+            )
+            if distance_sq <= radius_sq:
+                ranked.append((distance_sq, group))
+        return min(ranked, key=lambda row: row[0])[1] if ranked else None
+
+    def _same_threat_group(self, reservation, group):
+        if group is None:
+            return False
+        reserved_group_id = getattr(
+            reservation, 'threat_group_id', None)
+        if reserved_group_id and reserved_group_id == group['group_id']:
+            return True
+        reserved_lane = getattr(
+            reservation, 'threat_group_lane', None)
+        if reserved_lane and reserved_lane != group['lane']:
+            return False
+        card_ids = frozenset(
+            getattr(reservation, 'threat_card_ids', ()))
+        if card_ids and not (card_ids & group['card_ids']):
+            return False
+        anchor = getattr(reservation, 'threat_anchor', None)
+        if anchor is None:
+            return False
+        return (
+            (float(anchor[0]) - group['anchor'][0]) ** 2
+            + (float(anchor[1]) - group['anchor'][1]) ** 2
+            <= self.THREAT_GROUP_REBIND_RADIUS_WORLD ** 2
+        )
+
     def _local_live_card_cost(self, state, unit_owner, target, reference_owner):
         """Full surviving source-card cost in one local defensive cluster."""
         tx, ty = map(float, target)
@@ -499,7 +724,8 @@ class ActionExecutor:
             )
         return sum(groups.values())
 
-    def _local_reserved_defense_cost(self, owner, target):
+    def _local_reserved_defense_cost(
+            self, owner, target, threat_group=None):
         tx, ty = map(float, target)
         radius_sq = self.THREAT_BUDGET_RADIUS_WORLD ** 2
         seen = set()
@@ -516,6 +742,12 @@ class ActionExecutor:
             ):
                 continue
             if (
+                threat_group is not None
+                and not self._same_threat_group(
+                    reservation, threat_group)
+            ):
+                continue
+            if (
                 (float(anchor[0]) - tx) ** 2
                 + (float(anchor[1]) - ty) ** 2
                 > radius_sq
@@ -528,6 +760,36 @@ class ActionExecutor:
             )
         return total
 
+    def _group_live_defense_cost(
+            self, state, owner, threat_group):
+        ax, ay = threat_group['anchor']
+        radius_sq = self.THREAT_GROUP_DEFENSE_RADIUS_WORLD ** 2
+        groups = {}
+        for entity in state.entities:
+            if int(entity.get('owner', -1)) != int(owner):
+                continue
+            hp = entity.get('hp')
+            x, y = entity.get('x'), entity.get('y')
+            if (
+                not isinstance(hp, (int, float))
+                or float(hp) <= 0.0
+                or not isinstance(x, (int, float))
+                or not isinstance(y, (int, float))
+                or self._threat_group_lane(x) != threat_group['lane']
+                or (float(x) - ax) ** 2 + (float(y) - ay) ** 2
+                    > radius_sq
+            ):
+                continue
+            source = self._entity_source_card_id(entity)
+            if source is None:
+                continue
+            key = self._entity_budget_group_key(entity, source)
+            groups[key] = max(
+                groups.get(key, 0.0),
+                self._card_cost(source),
+            )
+        return sum(groups.values())
+
     def _defense_budget_context(self, action, state):
         if (
             self.card_cost_resolver is None
@@ -536,25 +798,40 @@ class ActionExecutor:
         ):
             return None
         target = action_world(action)
-        attack_budget = self._local_live_card_cost(
-            state,
-            1 - int(action.owner),
-            target,
-            int(action.owner),
-        )
+        threat_group = self._threat_group_for_action(
+            action, state)
+        if threat_group is not None:
+            attack_budget = float(
+                threat_group['attack_cost'])
+            board_defense = self._group_live_defense_cost(
+                state,
+                int(action.owner),
+                threat_group,
+            )
+            reserved_defense = self._local_reserved_defense_cost(
+                int(action.owner),
+                target,
+                threat_group=threat_group,
+            )
+        else:
+            attack_budget = self._local_live_card_cost(
+                state,
+                1 - int(action.owner),
+                target,
+                int(action.owner),
+            )
+            board_defense = self._local_live_card_cost(
+                state,
+                int(action.owner),
+                target,
+                int(action.owner),
+            )
+            reserved_defense = self._local_reserved_defense_cost(
+                int(action.owner),
+                target,
+            )
         if attack_budget <= 0.0:
             return None
-
-        board_defense = self._local_live_card_cost(
-            state,
-            int(action.owner),
-            target,
-            int(action.owner),
-        )
-        reserved_defense = self._local_reserved_defense_cost(
-            int(action.owner),
-            target,
-        )
         committed = max(board_defense, reserved_defense)
         margin = (
             self.THREAT_LARGE_PUSH_MARGIN_COST
@@ -572,6 +849,12 @@ class ActionExecutor:
             'budget_limit': limit,
             'candidate_cost': candidate_cost,
             'remaining_before_action': max(0.0, limit - committed),
+            'threat_group_id': (
+                threat_group['group_id']
+                if threat_group is not None else None),
+            'threat_group_lane': (
+                threat_group['lane']
+                if threat_group is not None else None),
         }
 
     @staticmethod
@@ -594,6 +877,11 @@ class ActionExecutor:
         """
         if action.kind.value != 'play_card' or action.target_grid is None:
             return frozenset()
+        if self.card_cost_resolver is not None:
+            threat_group = self._threat_group_for_action(
+                action, state)
+            if threat_group is not None:
+                return frozenset(threat_group['entity_ids'])
         target_x, target_y = action_world(action)
         if not self._on_own_half(action.owner, target_y):
             return frozenset()
@@ -773,8 +1061,19 @@ class ActionExecutor:
         threat_ids = self._nearby_threat_ids(action, state)
         if not threat_ids:
             return None, threat_ids
+        current_group = self._threat_group_for_action(
+            action, state)
         for reservation in reversed(self.threat_reservations):
             if reservation.owner != action.owner:
+                continue
+            if (
+                current_group is not None
+                and getattr(
+                    reservation, 'threat_group_id', None
+                ) is not None
+                and not self._same_threat_group(
+                    reservation, current_group)
+            ):
                 continue
             matched_ids = threat_ids & reservation.threat_ids
             if not matched_ids:
@@ -805,6 +1104,10 @@ class ActionExecutor:
                         budget_limit=round(budget['budget_limit'], 2),
                         remaining_before_action=round(
                             budget['remaining_before_action'], 2),
+                        threat_group_id=budget.get(
+                            'threat_group_id'),
+                        threat_group_lane=budget.get(
+                            'threat_group_lane'),
                     )
                     return None, threat_ids
 
@@ -821,6 +1124,10 @@ class ActionExecutor:
                     projected_defense=round(
                         projected_defense, 2),
                     budget_limit=round(budget['budget_limit'], 2),
+                    threat_group_id=budget.get(
+                        'threat_group_id'),
+                    threat_group_lane=budget.get(
+                        'threat_group_lane'),
                 )
                 return reservation, matched_ids
 
@@ -922,6 +1229,8 @@ class ActionExecutor:
             suppress_until + self.THREAT_MOSTLY_HANDLED_GRACE_SECONDS + 0.05,
         )
         budget = self._defense_budget_context(pending.action, state)
+        threat_group = self._threat_group_for_action(
+            pending.action, state)
         reservation = ThreatReservation(
             command_seq=pending.command_seq,
             owner=int(pending.action.owner),
@@ -940,6 +1249,20 @@ class ActionExecutor:
             attack_budget=(
                 float(budget['attack_budget'])
                 if budget is not None else 0.0
+            ),
+            threat_group_id=(
+                pending.threat_group_id
+                or (
+                    threat_group['group_id']
+                    if threat_group is not None else None
+                )
+            ),
+            threat_group_lane=(
+                pending.threat_group_lane
+                or (
+                    threat_group['lane']
+                    if threat_group is not None else None
+                )
             ),
         )
         self.threat_reservations[:] = [
@@ -964,7 +1287,16 @@ class ActionExecutor:
                      if budget is not None else None),
                  threat_card_ids=sorted(threat_card_ids),
                  threat_anchor=(list(threat_anchor)
-                                if threat_anchor is not None else None))
+                                if threat_anchor is not None else None),
+                 threat_group_id=reservation.threat_group_id,
+                 threat_group_lane=reservation.threat_group_lane,
+                 threat_group_attack_cost=(
+                     round(float(budget['attack_budget']), 2)
+                     if budget is not None else None),
+                 threat_group_assigned_defense_cost=(
+                     round(float(
+                         budget['committed_defense']), 2)
+                     if budget is not None else None))
         return True
 
     def pause(self):
@@ -1404,6 +1736,8 @@ class ActionExecutor:
                 continue
             threat_ids = frozenset()
             threat_target = None
+            threat_group_id = None
+            threat_group_lane = None
             if not skill:
                 reservation, threat_ids = self._matching_threat_reservation(action, state)
                 if reservation is not None:
@@ -1415,6 +1749,11 @@ class ActionExecutor:
                     continue
                 if threat_ids:
                     threat_target = action_world(action)
+                    threat_group = self._threat_group_for_action(
+                        action, state)
+                    if threat_group is not None:
+                        threat_group_id = threat_group['group_id']
+                        threat_group_lane = threat_group['lane']
             if state.elixir - self.reserved_elixir < cost:
                 self.log('action_rejected', reason='reserved_elixir', action=action.to_dict(),
                          elixir=state.elixir, reserved_elixir=self.reserved_elixir,
@@ -1423,7 +1762,9 @@ class ActionExecutor:
             due = state.received_at + action.execute_offset_ticks * config.TICK_SECONDS
             pending = PendingAction(action, state.tick, due, due + config.ACTION_MAX_LATENESS_SECONDS,
                 cost, command_seq=self._next_command_seq, decision_at=time.perf_counter(),
-                threat_ids=threat_ids, threat_target=threat_target)
+                threat_ids=threat_ids, threat_target=threat_target,
+                threat_group_id=threat_group_id,
+                threat_group_lane=threat_group_lane)
             pending.observation_received_at = state.received_at
             self._next_command_seq += 1
             if self.dry_run:
