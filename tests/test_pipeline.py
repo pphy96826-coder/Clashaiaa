@@ -233,7 +233,11 @@ class AdapterTests(unittest.TestCase):
         a.tensorize(s)
 
         giant = next(ent for ent in s.entities if ent['id'] == 9003)
-        giant['y'] = 13000
+        # Keep the tracked heavy core just outside the generic defensive-lane
+        # gate (>14500) but inside Musketeer's heavy-defense release window
+        # (<=15500). The right-lane distractor then owns the live lane gate,
+        # while the heavy defender must still be allowed on the left.
+        giant['y'] = 15000
         add_enemy(
             s, 9004, 14500, 10000,
             card_id=26000010, hp=100,
