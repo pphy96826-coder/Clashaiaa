@@ -3445,6 +3445,32 @@ class ExecutorTests(unittest.TestCase):
             & set(pending.threat_ids)
         )
 
+    def test_reservation_rebinds_when_probe_regenerates_enemy_ids(self):
+        s = state()
+        self._reserve_spell_swarm(s)
+
+        # The live probe may rebuild the same barrel children with new native
+        # ids. The card identity and local placement are still continuous.
+        s.entities[:] = [e for e in s.entities if e.get('owner') == s.local_owner]
+        for entity_id, x, y in (
+            (9911, 3000, 11500),
+            (9912, 4000, 11500),
+            (9913, 3500, 12500),
+        ):
+            add_enemy(s, entity_id, x, y, card_id=26000003, hp=200)
+
+        second = play(slot=1, card=s.hand_cards[1], grid=(4, 11))
+        self.executor.submit(SimpleNamespace(actions=(second,)), s)
+
+        self.assertFalse(self.executor.pending)
+        suppressed = [
+            data for event, data in self.events
+            if event == 'action_suppressed'
+            and data.get('reason') == 'threat_already_committed'
+        ]
+        self.assertTrue(suppressed)
+        self.assertEqual(set(suppressed[-1]['threat_ids']), {9911, 9912, 9913})
+
     def test_provisional_swarm_never_releases_before_ack_outcome(self):
         s = state()
         s.hand_cards[0] = 28000011
