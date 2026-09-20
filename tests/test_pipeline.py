@@ -585,6 +585,95 @@ class AdapterTests(unittest.TestCase):
             'strategy_hold_backfield_ice_golem',
         )
 
+    def test_backfield_overflow_cycles_instead_of_forcing_core_defender(self):
+        raw = opening()
+        hand = (
+            26000010,  # Skeletons
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            26000038,  # Ice Golem
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'backfield-overflow-cycle')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9331, 3500, 26000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'prepare_defense',
+        )
+        self.assertFalse(
+            o.action_mask.reasons['incoming_push_active'])
+        self.assertTrue(
+            o.action_mask.reasons['backfield_patience_active'])
+        self.assertTrue(
+            o.action_mask.reasons['defense_overflow_forced'])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_mode'],
+            'backfield_cycle',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (0,),
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertFalse(o.action_mask.hand_slots[3])
+
+    def test_generic_backfield_commitment_does_not_hard_reserve_fireball(self):
+        raw = opening()
+        hand = (
+            28000000,  # Fireball
+            26000010,  # Skeletons
+            27000000,  # Cannon
+            26000038,  # Ice Golem
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'backfield-fireball-advisory')
+        s.elixir = 8.0
+        add_enemy(
+            s, 9332, 3500, 26000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons['backfield_patience_active'])
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'playable',
+        )
+
     def test_prepare_defense_overflow_forces_safe_cycle_not_prebuild(self):
         raw = opening()
 

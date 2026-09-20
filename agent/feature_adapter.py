@@ -2153,7 +2153,7 @@ class FeatureAdapter:
                 SKELETONS: 2,
             }
 
-        elif mode == 'cycle_then_prebuild':
+        elif mode in ('cycle_then_prebuild', 'backfield_cycle'):
             priority = {
                 ICE_SPIRIT: 0,
                 SKELETONS: 1,
@@ -3176,7 +3176,6 @@ class FeatureAdapter:
                 and cid == MUSKETEER
                 and backfield_depth
                     > BACKFIELD_MUSKETEER_RELEASE_DEPTH
-                and not defense_overflow_active
             ):
                 slot_reasons[str(slot)] = (
                     'strategy_hold_backfield_musketeer'
@@ -3190,20 +3189,9 @@ class FeatureAdapter:
                 and cid == ICE_GOLEM
                 and backfield_depth
                     > BACKFIELD_ICE_GOLEM_RELEASE_DEPTH
-                and not defense_overflow_hard_cap
             ):
                 slot_reasons[str(slot)] = (
                     'strategy_hold_backfield_ice_golem'
-                )
-                continue
-
-            if (
-                backfield_patience
-                and incoming_push is None
-                and cid == FIREBALL
-            ):
-                slot_reasons[str(slot)] = (
-                    'strategy_hold_backfield_spell'
                 )
                 continue
 
@@ -3304,7 +3292,8 @@ class FeatureAdapter:
                 musketeer_slots = [
                     slot
                     for slot, cid in slots.items()
-                    if playable[slot]
+                    if incoming_push is not None
+                    and playable[slot]
                     and cid == MUSKETEER
                 ]
 
@@ -3355,6 +3344,8 @@ class FeatureAdapter:
                         )
                         defense_overflow_mode = (
                             'cycle_then_prebuild'
+                            if incoming_push is not None
+                            else 'backfield_cycle'
                         )
 
                     elif cannon_slots:
@@ -3382,7 +3373,10 @@ class FeatureAdapter:
                                 'heavy_commit_hog_punish'
                             )
 
-                        elif defense_overflow_hard_cap:
+                        elif (
+                            defense_overflow_hard_cap
+                            and incoming_push is not None
+                        ):
                             body_slots = [
                                 slot
                                 for slot, cid in slots.items()
