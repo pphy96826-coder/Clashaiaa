@@ -280,18 +280,30 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(o.action_mask.reasons['incoming_push_reserve_defenders'])
         self.assertFalse(o.action_mask.reasons['neutral_patience_active'])
 
-        # Musketeer is preserved while the core is still deep in the back,
-        # but cheap cycle remains legal so preparation cannot force overflow.
-        self.assertFalse(o.action_mask.hand_slots[1])
+        # At the cap, overflow formation takes priority over both cheap cycle
+        # and the optional Hog punish: establish the real backline defender
+        # first instead of leaking elixir or wasting Cannon lifetime.
+        self.assertTrue(o.action_mask.reasons['defense_overflow_active'])
+        self.assertTrue(o.action_mask.reasons['defense_overflow_forced'])
         self.assertEqual(
-            o.action_mask.reasons['slot_reasons']['1'],
-            'strategy_reserve_incoming_push',
+            o.action_mask.reasons['defense_overflow_mode'],
+            'backline_setup',
         )
-        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (1,),
+        )
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'strategy_defense_overflow_formation',
+        )
 
-        # At high elixir, Hog may punish the opposite lane instead of idling,
-        # while the reserved defender remains untouched.
-        self.assertTrue(o.action_mask.hand_slots[2])
+        # The heavy-commit opportunity still exists underneath the formation
+        # priority. Once we are below the overflow threshold, Hog is released
+        # into the opposite lane while the deep defensive core is preserved.
         self.assertEqual(
             o.action_mask.reasons['attack_opportunity_kind'],
             'heavy_commit',
@@ -301,7 +313,20 @@ class AdapterTests(unittest.TestCase):
             'opponent_backfield_heavy_commit',
         )
         self.assertEqual(o.action_mask.reasons['attack_opportunity_lane'], 'right')
-        hog = o.action_mask.placement_masks['2']
+
+        s.elixir = 9.0
+        s.tick += 1
+        _, punish = a.tensorize(s)
+
+        self.assertFalse(
+            punish.action_mask.reasons['defense_overflow_active'])
+        self.assertTrue(punish.action_mask.hand_slots[2])
+        self.assertFalse(punish.action_mask.hand_slots[1])
+        self.assertEqual(
+            punish.action_mask.reasons['slot_reasons']['1'],
+            'strategy_reserve_incoming_push',
+        )
+        hog = punish.action_mask.placement_masks['2']
         self.assertFalse(any(row[x] for row in hog['row_major'] for x in range(0, 9)))
         self.assertTrue(any(row[x] for row in hog['row_major'] for x in range(9, 18)))
 
