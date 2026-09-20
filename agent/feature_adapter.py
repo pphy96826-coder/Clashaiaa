@@ -6,6 +6,7 @@ invented hands, card cycles, parent groups or runtime character identities.
 import sys
 import math
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -1920,7 +1921,7 @@ class FeatureAdapter:
 
             entry = mask.placement_masks.get(str(slot))
 
-            if not isinstance(entry, dict):
+            if not isinstance(entry, Mapping):
                 continue
 
             cost = entry.get('effective_cost')
@@ -2119,7 +2120,7 @@ class FeatureAdapter:
             entry = mask.placement_masks.get(
                 str(slot))
 
-            if not isinstance(entry, dict):
+            if not isinstance(entry, Mapping):
                 continue
 
             cost = entry.get(

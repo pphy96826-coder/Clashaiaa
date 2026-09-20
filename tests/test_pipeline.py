@@ -565,9 +565,9 @@ class AdapterTests(unittest.TestCase):
 
         hand = (
             26000010,  # Skeletons
-            26000014,  # Musketeer
             27000000,  # Cannon
             28000000,  # Fireball
+            28000011,  # Log
         )
 
         raw['players'][0]['hand'] = [
@@ -606,7 +606,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(
             o.action_mask.reasons[
                 'defense_overflow_safe_slots'],
-            [0],
+            (0,),
         )
 
         self.assertTrue(o.action_mask.hand_slots[0])
@@ -662,7 +662,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(
             o.action_mask.reasons[
                 'defense_overflow_safe_slots'],
-            [3],
+            (3,),
         )
 
         self.assertFalse(o.action_mask.hand_slots[0])
