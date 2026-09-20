@@ -27,6 +27,19 @@ from bridge.live_replay_mirror import LiveReplayMirror, MirrorAction
 from bridge.coordinates import action_world
 
 
+ACTIVE_BATTLE_REATTACH_COOLDOWN_SECONDS = 0.75
+
+
+def _should_reattach_active_battle(identity, status):
+    """Treat a lone probe idle state as non-terminal while a match is active.
+
+    Native state.native_finalized is the authoritative terminal gate. A
+    transient UI overlay (for example the emote tray) may briefly make the
+    probe report idle even though the battle tick is still live.
+    """
+    return identity is not None and str(status or '').strip().lower() == 'idle'
+
+
 class CustomCardDeployAgent:
     def __init__(self, checkpoint_path=None, device_str='cuda:0', *, dry_run=False,
                  account_id=config.LOCAL_ACCOUNT_ID, owner=None, sample=False,
@@ -48,8 +61,19 @@ class CustomCardDeployAgent:
         self.log_path = Path(log_path or config.BASE_DIR / 'logs' / (time.strftime('%Y%m%d-%H%M%S') + '.jsonl'))
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.stream = self.log_path.open('a', encoding='utf-8', buffering=1)
-        self.executor = ActionExecutor(self.actuator, self.log, dry_run=dry_run,
-            on_ability_ack=self.adapter.record_ability_execution, max_actions=max_actions)
+
+        def live_card_cost(card_id):
+            spec = self.adapter.bundle.card_specs.get(int(card_id))
+            return float(spec.elixir_cost) if spec is not None else 0.0
+
+        self.executor = ActionExecutor(
+            self.actuator,
+            self.log,
+            dry_run=dry_run,
+            on_ability_ack=self.adapter.record_ability_execution,
+            max_actions=max_actions,
+            card_cost_resolver=live_card_cost,
+        )
         self.log('model_loading', checkpoint=str(checkpoint), device=device_str,
                  observation_profile=observation_profile, experimental_origins=experimental_origins)
         self.engine = None
@@ -155,7 +179,47 @@ class CustomCardDeployAgent:
     def _validate_action(self, action, state):
         if state.native_finalized:
             return False
-        obs = self.adapter.build_observation(state)
+        blocked_slots = set(
+            self.executor.blocked_slots(state)
+        )
+        blocked_abilities = set(
+            self.executor.blocked_abilities()
+        )
+        reserved_elixir = float(
+            self.executor.reserved_elixir
+        )
+
+        # The action being revalidated is already present in executor.pending.
+        # Do not let its own queued reservation make it fail its own live
+        # legality check.  Keep every *other* unresolved action/guard intact.
+        if action.kind.value == 'play_card':
+            if action.hand_slot is not None:
+                blocked_slots.discard(
+                    int(action.hand_slot)
+                )
+            reserved_elixir = max(
+                0.0,
+                reserved_elixir
+                - float(action.metadata[
+                    'policy_effective_cost'
+                ]),
+            )
+        elif action.kind.value == 'activate_ability':
+            if action.source_entity is not None:
+                blocked_abilities.discard(
+                    int(action.source_entity)
+                )
+            reserved_elixir = max(
+                0.0,
+                reserved_elixir - 3.0,
+            )
+
+        obs = self.adapter.build_observation(
+            state,
+            tuple(sorted(blocked_slots)),
+            reserved_elixir,
+            tuple(sorted(blocked_abilities)),
+        )
         self.actuator.guard_hero_hud = self.adapter.quality.get('ability_hud_excluded', False)
         if action.kind.value == 'activate_ability':
             own = next(p for p in obs.players if p.owner == state.local_owner)
@@ -204,6 +268,10 @@ class CustomCardDeployAgent:
         simulation_entities = None
         auto_emotes = False
         next_emote_at = 0.0
+        last_prelock_fast_key = None
+        last_prelock_diag_key = None
+        last_prelock_conflict_key = None
+        last_active_reattach = 0.0
         match_count = 0
         lifecycle = None
         if continuous:
@@ -213,10 +281,15 @@ class CustomCardDeployAgent:
             console.start()
         self.actuator.prepare()
         if self.adapter.hero_mode is not False:
-            from bridge.hero_execution import ability_button
+            from bridge.hero_execution import ensure_ability_calibration
             try:
-                ability_button(config.ABILITY_CALIBRATION_PATH, self.actuator.size)
+                ability_point, generated = ensure_ability_calibration(
+                    config.ABILITY_CALIBRATION_PATH, self.actuator.size)
                 self.adapter.hero_skill_ready = True
+                self.log('ability_input_ready',
+                         screen=list(ability_point),
+                         calibration=str(config.ABILITY_CALIBRATION_PATH),
+                         generated=generated)
             except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError) as exc:
                 self.log('ability_input_disabled', reason=str(exc))
         if lifecycle is not None:
@@ -322,7 +395,8 @@ class CustomCardDeployAgent:
                         f"battle={'active' if current_state is not None else 'idle'} "
                         f"tick={getattr(current_state, 'tick', None)} "
                         f"confirmed={self.executor.confirmed_actions} "
-                        f"pending={len(self.executor.pending)} matches={match_count}"
+                        f"pending={len(self.executor.pending)} "
+                        f"ack_watch={len(self.executor.ack_watch)} matches={match_count}"
                     )
                 elif name == 'recover':
                     if lifecycle is None:
@@ -386,6 +460,43 @@ class CustomCardDeployAgent:
                 process_console_commands(state)
                 if state is None:
                     self.executor.poll(None, self._validate_action)
+
+                    # A transient UI overlay can briefly make the probe report
+                    # idle even though the battle itself is still active. Do
+                    # not demote an episode that already has an identity; the
+                    # native finalized contract below remains the only normal
+                    # terminal gate. Re-attaching is read-only and lets the
+                    # telemetry lane reacquire the same episode.
+                    if _should_reattach_active_battle(
+                            identity, self.probe.last_status):
+                        if (now - last_active_reattach
+                                >= ACTIVE_BATTLE_REATTACH_COOLDOWN_SECONDS):
+                            try:
+                                self.probe.attach_live_context()
+                                self.log(
+                                    'battle_idle_guard',
+                                    last_tick=last_seen_tick,
+                                    status=self.probe.last_status,
+                                    action='reattach_live_context',
+                                    telemetry_age_ms=round(
+                                        max(0.0, now - last_live) * 1000.0, 1),
+                                )
+                            except (OSError, RuntimeError, ValueError) as exc:
+                                self.log(
+                                    'battle_idle_guard_error',
+                                    last_tick=last_seen_tick,
+                                    status=self.probe.last_status,
+                                    error=str(exc),
+                                )
+                            last_active_reattach = now
+                        message = self.probe.last_error or self.probe.last_status
+                        if message != last_message:
+                            self.log('waiting', status=message,
+                                     guarded_active_battle=True)
+                            last_message = message
+                        time.sleep(.05)
+                        continue
+
                     if identity is not None and not suspended and now-last_live > config.STALE_SECONDS:
                         self.log('telemetry_paused', last_tick=last_seen_tick, status=self.probe.last_status)
                         self.executor.pause()
@@ -431,7 +542,8 @@ class CustomCardDeployAgent:
                         break
                     if lifecycle is not None:
                         try:
-                            lifecycle.return_to_lobby()
+                            lifecycle.return_to_lobby(
+                                terminal_confirmed=True)
                         except LifecycleError as exc:
                             self.log('lifecycle_error', phase='return-to-lobby', error=str(exc))
                             break
@@ -440,12 +552,15 @@ class CustomCardDeployAgent:
                                      matches=match_count)
                             break
                         try:
-                            lifecycle.start_battle()
+                            lifecycle.start_battle(ensure_lobby=False)
                         except LifecycleError as exc:
                             self.log('lifecycle_error', phase='next-battle', error=str(exc))
                             break
                         last_seen_tick = -1
                         last_decision_tick = -1
+                        last_prelock_fast_key = None
+                        last_prelock_diag_key = None
+                        last_prelock_conflict_key = None
                         ended = None
                         suspended = False
                         wait_since = None
@@ -555,6 +670,9 @@ class CustomCardDeployAgent:
                         continue
                     identity = state.identity
                     last_decision_tick = -1
+                    last_prelock_fast_key = None
+                    last_prelock_diag_key = None
+                    last_prelock_conflict_key = None
                     ended = None
                     wait_since = None
                 last_seen_tick = state.tick
@@ -563,6 +681,170 @@ class CustomCardDeployAgent:
                     # Reconcile completed input before doing any synchronous
                     # offline work, so mirror RPCs cannot delay touch ACKs.
                     self.executor.poll(state, self._validate_action)
+
+                    # Detect a tower-lock threat before ordinary cadence gates.
+                    # A threat already covered by an active reservation is
+                    # excluded so an unrelated second-lane threat can still
+                    # become the emergency candidate immediately.
+                    raw_prelock = self.adapter.prelock_context(
+                        state,
+                        self.executor.end_to_end_latency_ms,
+                    )
+
+                    reserved_prelock_ids = (
+                        self.executor.prelock_reserved_threat_ids(state)
+                    )
+
+                    raw_prelock_conflict = bool(
+                        raw_prelock is not None
+                        and int(raw_prelock['enemy_id'])
+                            in reserved_prelock_ids
+                    )
+
+                    if raw_prelock_conflict:
+                        conflict_key = (
+                            int(raw_prelock['enemy_id']),
+                            str(raw_prelock['state']),
+                            str(raw_prelock['reason']),
+                        )
+
+                        if conflict_key != last_prelock_conflict_key:
+                            self.log(
+                                'prelock_threat',
+                                tick=state.tick,
+                                prelock_state=raw_prelock['state'],
+                                reason=raw_prelock['reason'],
+                                enemy_id=raw_prelock['enemy_id'],
+                                enemy_card_id=raw_prelock[
+                                    'enemy_card_id'],
+                                tower_id=raw_prelock['tower_id'],
+                                lane=raw_prelock['lane'],
+                                distance=round(
+                                    raw_prelock['distance'], 1),
+                                distance_to_lock=round(
+                                    raw_prelock[
+                                        'distance_to_lock'], 1),
+                                attack_range=(
+                                    round(
+                                        raw_prelock[
+                                            'attack_range'], 1)
+                                    if raw_prelock[
+                                        'attack_range'] is not None
+                                    else None
+                                ),
+                                closing_speed_per_tick=round(
+                                    raw_prelock[
+                                        'closing_speed_per_tick'], 2),
+                                lock_eta_ms=round(
+                                    raw_prelock['lock_eta_ms'], 1),
+                                latest_safe_response_ms=round(
+                                    raw_prelock[
+                                        'latest_safe_response_ms'], 1),
+                                reservation_conflict=True,
+                                fast_path=False,
+                            )
+
+                            last_prelock_conflict_key = conflict_key
+
+                        prelock = self.adapter.prelock_context(
+                            state,
+                            self.executor.end_to_end_latency_ms,
+                            excluded_enemy_ids=reserved_prelock_ids,
+                        )
+                    else:
+                        prelock = raw_prelock
+                        last_prelock_conflict_key = None
+
+                    prelock_conflict = (
+                        self.executor.prelock_reservation_conflict(
+                            prelock, state)
+                        if prelock is not None
+                        else False
+                    )
+
+                    prelock_key = (
+                        (
+                            int(prelock['enemy_id']),
+                            str(prelock['state']),
+                        )
+                        if prelock is not None
+                        else None
+                    )
+
+                    if prelock is None:
+                        last_prelock_fast_key = None
+                        last_prelock_diag_key = None
+
+                    prelock_fast_path = bool(
+                        prelock is not None
+                        and not prelock_conflict
+                        and prelock_key != last_prelock_fast_key
+                        and not paused
+                        and pending_model is None
+                        and not model_warmup_pending
+                        and not self.executor.pending
+                        and self.executor.future is None
+                    )
+
+                    if prelock_fast_path:
+                        prelock_fast_path = (
+                            self.executor.interrupt_post_action_recheck(
+                                prelock, state)
+                        )
+
+                    if prelock is not None:
+                        diag_key = (
+                            int(prelock['enemy_id']),
+                            str(prelock['state']),
+                            str(prelock['reason']),
+                            bool(prelock_conflict),
+                        )
+
+                        if diag_key != last_prelock_diag_key:
+                            self.log(
+                                'prelock_threat',
+                                tick=state.tick,
+                                prelock_state=prelock['state'],
+                                reason=prelock['reason'],
+                                enemy_id=prelock['enemy_id'],
+                                enemy_card_id=prelock[
+                                    'enemy_card_id'],
+                                tower_id=prelock['tower_id'],
+                                lane=prelock['lane'],
+                                distance=round(
+                                    prelock['distance'], 1),
+                                distance_to_lock=round(
+                                    prelock['distance_to_lock'], 1),
+                                attack_range=(
+                                    round(prelock['attack_range'], 1)
+                                    if prelock[
+                                        'attack_range'] is not None
+                                    else None
+                                ),
+                                closing_speed_per_tick=round(
+                                    prelock[
+                                        'closing_speed_per_tick'], 2),
+                                lock_eta_ms=round(
+                                    prelock['lock_eta_ms'], 1),
+                                latest_safe_response_ms=round(
+                                    prelock[
+                                        'latest_safe_response_ms'], 1),
+                                reservation_conflict=prelock_conflict,
+                                fast_path=prelock_fast_path,
+                            )
+
+                            last_prelock_diag_key = diag_key
+
+                    normal_policy_due = (
+                        state.tick
+                        >= last_decision_tick
+                        + config.DECISION_TICKS
+                    )
+
+                    policy_due = (
+                        normal_policy_due
+                        or prelock_fast_path
+                    )
                     self._last_simulation_forecast = None
                     mirror = getattr(self, 'mirror', None)
                     if mirror is not None and mirror.active:
@@ -605,7 +887,7 @@ class CustomCardDeployAgent:
                         if (mirror.active and not paused and pending_model is None
                                 and not self.executor.pending and self.executor.future is None
                                 and state.tick >= FIRST_POLICY_DECISION_TICK
-                                and state.tick >= last_decision_tick + config.DECISION_TICKS
+                                and policy_due
                                 and not self.executor.decision_blocked(state)):
                             # Use the same time basis as pending virtual-card
                             # predictions: measured end-to-end input latency
@@ -652,6 +934,7 @@ class CustomCardDeployAgent:
                         time.sleep(.001)
                         continue
                     if (auto_emotes and lifecycle is not None and not self.executor.pending
+                            and not self.executor.ack_watch
                             and self.executor.future is None and time.monotonic() >= next_emote_at):
                         try:
                             lifecycle.send_emote(random.randrange(8))
@@ -669,11 +952,20 @@ class CustomCardDeployAgent:
                         self.log('execution_halted', reason=self.executor.fault,
                                  tick=state.tick)
                         break
-                    if (self.executor.max_actions is not None and
-                        self.executor.confirmed_actions >= self.executor.max_actions):
-                        self.log('action_budget_reached', max_actions=self.executor.max_actions,
-                                 confirmed_actions=self.executor.confirmed_actions, tick=state.tick)
-                        break
+                    if self.executor.action_budget_exhausted:
+                        # Do not keep running policy after the requested number
+                        # of real action attempts. Let background ACK watches
+                        # reconcile for at most their normal timeout, then stop
+                        # with complete outcome logs.
+                        if self.executor.action_budget_settled:
+                            self.log('action_budget_reached',
+                                     max_actions=self.executor.max_actions,
+                                     attempted_actions=self.executor.attempted_actions,
+                                     confirmed_actions=self.executor.confirmed_actions,
+                                     tick=state.tick)
+                            break
+                        time.sleep(.005)
+                        continue
                     if model_warmup_pending:
                         warm_batch, _ = self.adapter.tensorize(
                             state, self.executor.blocked_slots(state),
@@ -689,13 +981,13 @@ class CustomCardDeployAgent:
                     if paused or pending_model is not None:
                         time.sleep(.01)
                         continue
-                    # Do not infer against a state that is about to be
-                    # invalidated by the previous card input.  Input is
-                    # strictly serial; policy decisions must be serial too,
-                    # otherwise a queued decision can be based on the old
-                    # hand/elixir and become suboptimal after rotation.
+                    # Touch input remains strictly serial, but ACK
+                    # reconciliation is background work. Once the touch worker
+                    # completes, ack_watch keeps the old slot/cost protected
+                    # while policy may react with another legal slot on a
+                    # fresh authoritative frame.
                     if (state.tick >= FIRST_POLICY_DECISION_TICK
-                            and state.tick >= last_decision_tick + config.DECISION_TICKS
+                            and policy_due
                             and not self.executor.pending
                             and self.executor.future is None
                             and not self.executor.decision_blocked(state)):
@@ -703,7 +995,95 @@ class CustomCardDeployAgent:
                         batch, obs = self.adapter.tensorize(state, self.executor.blocked_slots(state), self.executor.reserved_elixir,
                             self.executor.blocked_abilities(), self.executor.model_predictions(state),
                             simulation_entities=simulation_entities)
-                        decoded, inference_ms = self._engine().decide(batch, obs, self.adapter)
+                        decoded, inference_ms = self._engine().decide(
+                            batch,
+                            obs,
+                            self.adapter,
+                            emergency=prelock_fast_path,
+                        )
+                        overflow_fallback = None
+
+                        if (
+                            all(
+                                action.kind.value == 'wait'
+                                for action in decoded.actions
+                            )
+                            and obs.action_mask.reasons.get(
+                                'defense_overflow_forced')
+                        ):
+                            overflow_fallback = (
+                                self.adapter.defense_overflow_fallback(
+                                    state, obs)
+                            )
+
+                        if overflow_fallback is not None:
+                            decoded = type(decoded)(
+                                owner=decoded.owner,
+                                actions=(overflow_fallback,),
+                            )
+
+                            self.log(
+                                'defense_overflow_fallback',
+                                tick=state.tick,
+                                elixir=state.elixir,
+                                slot=overflow_fallback.hand_slot,
+                                card=overflow_fallback.card_id,
+                                target_grid=overflow_fallback.target_grid,
+                                mode=overflow_fallback.metadata.get(
+                                    'defense_overflow_mode'),
+                                safe_slots=obs.action_mask.reasons.get(
+                                    'defense_overflow_safe_slots'),
+                                cannon_prebuild_lead_ticks=(
+                                    obs.action_mask.reasons.get(
+                                        'cannon_prebuild_lead_ticks')
+                                ),
+                            )
+
+                        if (
+                            overflow_fallback is None
+                            and all(
+                                action.kind.value == 'wait'
+                                for action in decoded.actions
+                            )
+                            and obs.action_mask.reasons.get(
+                                'neutral_overflow_active')
+                        ):
+                            neutral_overflow_fallback = (
+                                self.adapter.neutral_overflow_fallback(
+                                    state, obs)
+                            )
+
+                            if neutral_overflow_fallback is not None:
+                                decoded = type(decoded)(
+                                    owner=decoded.owner,
+                                    actions=(
+                                        neutral_overflow_fallback,
+                                    ),
+                                )
+                                self.log(
+                                    'neutral_overflow_fallback',
+                                    tick=state.tick,
+                                    elixir=state.elixir,
+                                    slot=(
+                                        neutral_overflow_fallback
+                                        .hand_slot
+                                    ),
+                                    card=(
+                                        neutral_overflow_fallback
+                                        .card_id
+                                    ),
+                                    target_grid=(
+                                        neutral_overflow_fallback
+                                        .target_grid
+                                    ),
+                                    mode=(
+                                        neutral_overflow_fallback
+                                        .metadata.get(
+                                            'neutral_overflow_mode'
+                                        )
+                                    ),
+                                )
+
                         adjusted = []
                         for action in decoded.actions:
                             # A valid mirror already contains the target at
@@ -735,7 +1115,12 @@ class CustomCardDeployAgent:
                         if not waiting:
                             self.log('decision', tick=state.tick, inference_ms=inference_ms,
                                 pipeline_ms=(time.perf_counter()-pipeline_start)*1000,
+                                probe_query_ms=self.probe.last_query_ms,
+                                frame_to_policy_start_ms=max(
+                                    0.0, (pipeline_start-state.received_at)*1000),
                                 tick_gap=None if last_decision_tick < 0 else state.tick-last_decision_tick,
+                                prelock_fast_path=bool(prelock_fast_path),
+                                emergency_policy_turn=bool(prelock_fast_path),
                                 simulation_used=simulation_entities is not None,
                                 simulation_entity_count=(len(simulation_entities)
                                                           if simulation_entities is not None else 0),
@@ -758,6 +1143,8 @@ class CustomCardDeployAgent:
                                 legal_candidates=int(batch.candidates.mask.sum()))
                         wait_since = (state.tick if wait_since is None else wait_since) if waiting else None
                         last_decision_tick = state.tick
+                        if prelock_fast_path:
+                            last_prelock_fast_key = prelock_key
                         # After any card consume (or an ambiguous touch), use
                         # a settled frame as a no-write preview.  A follow-up
                         # card is sent only if it remains the same highest

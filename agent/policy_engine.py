@@ -84,12 +84,41 @@ class PolicyEngine:
         self._first_decision = True
         self._last_tick = None
 
+    def decision_interval_ready(self, tick, *, emergency=False):
+        """Whether a policy turn has a fresh enough authoritative frame.
+
+        Production V4 remains on its trained DECISION_TICKS cadence. A rare
+        pre-lock emergency may consume the very next native tick so bridge
+        threats can be answered before tower lock. Even emergency decisions
+        can never run twice on the same tick.
+        """
+        if self._last_tick is None:
+            return True
+
+        minimum_ticks = (
+            1 if emergency
+            else int(config.DECISION_TICKS)
+        )
+
+        return int(tick) >= int(self._last_tick) + minimum_ticks
+
     @torch.inference_mode()
-    def decide(self, batch, obs: ObservationV1, adapter: FeatureAdapter):
+    def decide(
+            self, batch, obs: ObservationV1,
+            adapter: FeatureAdapter, *, emergency=False):
         if self.recurrent_state is None:
             self.reset()
-        if self._last_tick is not None and obs.tick < self._last_tick + config.DECISION_TICKS:
-            raise ValueError(f'V4 decisions require a fresh {config.DECISION_TICKS}-tick interval')
+
+        if not self.decision_interval_ready(
+                obs.tick, emergency=emergency):
+            minimum_ticks = (
+                1 if emergency
+                else int(config.DECISION_TICKS)
+            )
+            raise ValueError(
+                'V4 decisions require a fresh '
+                f'{minimum_ticks}-tick interval'
+            )
 
         t0 = time.perf_counter()
         model_batch = batch.to_model_input(self.device)

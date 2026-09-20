@@ -126,10 +126,18 @@ FULL_SIMULATION_REQUIRE_STANDARD_DECK = SETTINGS.get(
 FULL_SIMULATION_PARTIAL_OPPONENT = SETTINGS.get(
     'full_simulation_partial_opponent', True) is True
 STALE_SECONDS = 1.2
-# Hand rotation is advisory telemetry, not an input gate.  Release a missed
-# action quickly so a slow/missing ACK cannot stall the match for seconds;
-# the touch worker remains strictly serial and never replays the write.
+# Ability ACKs stay short because an ambiguous skill tap is never replayed.
+# Card ACKs use a separate bounded adaptive budget below: while waiting, only
+# that exact native slot is locked, so unrelated cards can still be played.
 ACK_TIMEOUT_SECONDS = 0.35
+CARD_ACK_TIMEOUT_BASE_SECONDS = 1.1
+CARD_ACK_TIMEOUT_MAX_SECONDS = 1.4
+# Cold-start hand telemetry is consistently slower before the first few
+# authoritative hand/cycle ACKs. Weak elixir/entity ACKs do not count toward
+# this bootstrap because they are much faster than the slow telemetry path.
+CARD_ACK_BOOTSTRAP_SAMPLES = 3
+CARD_ACK_TIMEOUT_MARGIN_SECONDS = 0.18
+CARD_ACK_TIMEOUT_INPUT_MULTIPLIER = 2.0
 # Keep an ambiguous touch visible to the model briefly after timeout.  The
 # card remains usable and other slots are not blocked; this only prevents a
 # missing ACK from making the same threat look completely untouched.
@@ -138,6 +146,13 @@ UNCERTAIN_PREDICTION_SECONDS = 1.4
 # publishing the updated hand/elixir snapshot. This prevents stale telemetry
 # from authorizing a second card that the game can no longer afford.
 ELIXIR_RESERVATION_SECONDS = 1.25
+# Weak positive ACKs (spawn or elixir before native hand rotation) keep the
+# exact stale slot quarantined until either the native hand rotates or the
+# exact native cycle plus the other three hand slots uniquely prove the
+# replacement card. This value only bounds the extra *virtual spend*
+# protection; timeout alone never reopens a stale slot.
+# The quarantine is slot-local, so the other three cards continue normally.
+SLOT_CONSUME_GUARD_MAX_SECONDS = 3.0
 ACTION_MAX_LATENESS_SECONDS = 0.8
 # Minimum UI settle time between selecting a card and placing it.  Keep a
 # bounded gap for the Android UI commit, but avoid adding an unnecessary
@@ -154,6 +169,45 @@ if POST_ACTION_SETTLE_TICKS < 0:
     raise ValueError('post_action_settle_ticks must be non-negative')
 if not 0.0 < POST_ACTION_RECHECK_MIN_SCORE_RATIO <= 1.0:
     raise ValueError('post_action_recheck_min_score_ratio must be in (0, 1]')
+
+
+# Pre-lock tower defence.
+#
+# This is deliberately earlier than first damage / tower lock. It estimates
+# when an approaching troop enters a princess tower's attack-acquisition
+# envelope, subtracts measured host/input latency and a safety margin, then
+# allows one immediate policy turn if the remaining safe response budget is
+# small.
+PRELOCK_URGENT_MS = float(
+    SETTINGS.get('prelock_urgent_ms', 850.0))
+PRELOCK_CRITICAL_MS = float(
+    SETTINGS.get('prelock_critical_ms', 300.0))
+PRELOCK_SAFETY_MARGIN_MS = float(
+    SETTINGS.get('prelock_safety_margin_ms', 180.0))
+
+# Used only before a reliable second position sample exists. A newly observed
+# ranged threat must already be close to its own attack-range envelope; merely
+# crossing the bridge is not enough.
+PRELOCK_FALLBACK_DISTANCE_WORLD = float(
+    SETTINGS.get('prelock_fallback_distance_world', 3500.0))
+PRELOCK_NEW_ENTITY_TICKS = int(
+    SETTINGS.get('prelock_new_entity_ticks', 8))
+PRELOCK_MIN_CLOSING_SPEED = float(
+    SETTINGS.get('prelock_min_closing_speed', 20.0))
+
+if PRELOCK_URGENT_MS <= 0:
+    raise ValueError('prelock_urgent_ms must be positive')
+if PRELOCK_CRITICAL_MS < 0 or PRELOCK_CRITICAL_MS >= PRELOCK_URGENT_MS:
+    raise ValueError(
+        'prelock_critical_ms must be >= 0 and below prelock_urgent_ms')
+if PRELOCK_SAFETY_MARGIN_MS < 0:
+    raise ValueError('prelock_safety_margin_ms must be non-negative')
+if PRELOCK_FALLBACK_DISTANCE_WORLD <= 0:
+    raise ValueError('prelock_fallback_distance_world must be positive')
+if PRELOCK_NEW_ENTITY_TICKS < 0:
+    raise ValueError('prelock_new_entity_ticks must be non-negative')
+if PRELOCK_MIN_CLOSING_SPEED < 0:
+    raise ValueError('prelock_min_closing_speed must be non-negative')
 
 # Compatibility helper: grid indices are cell centers, including subcell.
 # New execution code takes the whole decoded ActionV1 (and its owner).

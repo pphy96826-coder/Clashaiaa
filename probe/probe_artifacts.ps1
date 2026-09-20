@@ -1,6 +1,28 @@
 # Shared artifact resolution. No ADB operations or filesystem mutations here.
 $script:ProbeArtifactRoot = $PSScriptRoot
-$script:StableProbeSha256 = '9d1c8d79712c7116e27c324dd9bcbd85d6be07923e7c8b989c61bee57cd095b0'
+$script:StableProbeManifestPath = Join-Path $script:ProbeArtifactRoot 'stable_probe.json'
+
+if (!(Test-Path -LiteralPath $script:StableProbeManifestPath -PathType Leaf)) {
+    throw 'Stable Probe manifest is missing'
+}
+
+$script:StableProbeManifest = Get-Content -LiteralPath $script:StableProbeManifestPath -Raw |
+    ConvertFrom-Json
+
+if ($script:StableProbeManifest.schema -ne 'royaleharness.stable-probe.v1' -or
+    $script:StableProbeManifest.profile -ne 'stable' -or
+    $script:StableProbeManifest.validation -ne 'previously_live_validated_binary') {
+    throw 'Stable Probe manifest is invalid'
+}
+
+$script:StableProbeSha256 = ([string]$script:StableProbeManifest.sha256).ToLowerInvariant()
+$script:StableProbeRelativePath = [string]$script:StableProbeManifest.path
+
+if ($script:StableProbeSha256 -notmatch '^[0-9a-f]{64}$' -or
+    !$script:StableProbeRelativePath -or
+    $script:StableProbeRelativePath -match '(^[\\/])|(^|[\\/])\.\.([\\/]|$)') {
+    throw 'Stable Probe manifest path/hash is invalid'
+}
 
 function Get-ProbeSourceHashes {
     Get-ChildItem -LiteralPath $script:ProbeArtifactRoot -File |
@@ -25,7 +47,10 @@ function Get-ProbeArtifact {
         }
     }
     if ($Profile -eq 'Stable') {
-        $path = Join-Path $script:ProbeArtifactRoot 'artifacts/stable/libscid_sdk.so'
+        $path = Join-Path $script:ProbeArtifactRoot $script:StableProbeRelativePath
+        if (!(Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Pinned Stable Probe binary is missing: $path"
+        }
         $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($hash -ne $script:StableProbeSha256) { throw 'Pinned stable probe checksum mismatch; no device operation permitted' }
         return [pscustomobject]@{

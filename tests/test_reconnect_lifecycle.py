@@ -2,16 +2,19 @@
 import copy
 import io
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from test_pipeline import opening
+from tests.test_pipeline import opening
 from main import CustomCardDeployAgent
+from live_lifecycle import LiveLifecycle
 from agent.feature_adapter import FeatureAdapter
 from agent.execution import ActionExecutor
 from bridge.coordinates import ScreenCalibration
 from bridge.probe_client import ProbeClient
+from bridge import lifecycle_screen
 from native_runner.contracts import ActionV1, ActionKind, TargetKind
 
 
@@ -22,6 +25,79 @@ def state(tick, terminal=False, opponent=456):
     if terminal:
         raw['battle_result'] = {'validated': True, 'finalized': True, 'world_result_raw': 0}
     return ProbeClient(account_id=123).parse(raw)
+
+
+class LifecycleScreenReaderTests(unittest.TestCase):
+    def test_reader_uses_active_python_virtualenv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            python = Path(tmp) / 'active-venv' / 'bin' / 'python'
+            python.parent.mkdir(parents=True)
+            reader = python.parent / 'lifecycle-ocr'
+            reader.write_text('ready', encoding='utf-8')
+            with patch.object(lifecycle_screen.config, 'VENV_PYTHON', python):
+                self.assertEqual(lifecycle_screen.ensure_reader(), reader)
+
+    def test_missing_reader_is_built_from_repo_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            python = root / 'active-venv' / 'bin' / 'python'
+            python.parent.mkdir(parents=True)
+            source = root / 'repo' / 'tools' / 'lifecycle_ocr.m'
+            source.parent.mkdir(parents=True)
+            source.write_text('int main(void) { return 0; }', encoding='utf-8')
+
+            def fake_run(command, **kwargs):
+                Path(command[-1]).write_text('binary', encoding='utf-8')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+            with patch.object(lifecycle_screen.config, 'VENV_PYTHON', python), \
+                    patch.object(lifecycle_screen.config, 'BASE_DIR', root / 'repo'), \
+                    patch.object(lifecycle_screen.shutil, 'which', return_value='/usr/bin/xcrun'), \
+                    patch.object(lifecycle_screen.subprocess, 'run', side_effect=fake_run):
+                reader = lifecycle_screen.ensure_reader()
+
+            self.assertEqual(reader, python.parent / 'lifecycle-ocr')
+            self.assertTrue(reader.is_file())
+
+
+class ContinuousLifecycleUnitTests(unittest.TestCase):
+    def _lifecycle(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.recover_runtime = Mock(return_value={'ok': True, 'restarted': False})
+        lifecycle.return_to_lobby = Mock()
+        lifecycle.probe = Mock()
+        lifecycle._tap = Mock()
+        lifecycle.calibration = {'battle_button': (540, 1490)}
+        lifecycle.log = Mock()
+        return lifecycle
+
+    def test_automatic_start_confirms_lobby_before_battle_tap(self):
+        lifecycle = self._lifecycle()
+
+        lifecycle.start_battle()
+
+        lifecycle.recover_runtime.assert_called_once_with()
+        lifecycle.return_to_lobby.assert_called_once_with(
+            timeout_seconds=20.0)
+        lifecycle.probe.reset_live_context.assert_called_once_with()
+        lifecycle._tap.assert_called_once_with((540, 1490), 'battle')
+        lifecycle.probe.arm_live_context.assert_called_once_with()
+        lifecycle.log.assert_called_once_with(
+            'battle_requested', mode='continuous',
+            lobby_confirmed=True)
+
+    def test_next_match_can_skip_duplicate_lobby_confirmation(self):
+        lifecycle = self._lifecycle()
+
+        lifecycle.start_battle(ensure_lobby=False)
+
+        lifecycle.return_to_lobby.assert_not_called()
+        lifecycle.probe.reset_live_context.assert_called_once_with()
+        lifecycle._tap.assert_called_once_with((540, 1490), 'battle')
+        lifecycle.probe.arm_live_context.assert_called_once_with()
+        lifecycle.log.assert_called_once_with(
+            'battle_requested', mode='continuous',
+            lobby_confirmed=False)
 
 
 class ReconnectLifecycleTests(unittest.TestCase):

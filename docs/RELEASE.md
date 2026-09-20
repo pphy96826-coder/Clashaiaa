@@ -6,6 +6,14 @@
 排除：原始游戏／SDK 二进制、APK、模型权重、上游资源、原始回放、截图、个人配置、账号、虚拟环境和实验产物。
 公开探针 `.so` 是本项目源码编译的代理，不是原始游戏 SDK。
 
+
+Stable Probe 的正式路径、游戏指纹和 SHA-256 统一由
+`probe/stable_probe.json` 定义。Python 安装器、PowerShell 产物解析器和发布打包器
+必须读取或校验同一个定义；任何 candidate／retry 目录都不能成为隐式默认 Stable。
+
+`tools/package_release.py` 会强制检查正式 Stable `.so` 存在、哈希匹配且已列入
+`SHA256SUMS.json`。缺少正式二进制时打包必须失败，而不是生成一个无法部署的发布包。
+
 运行 FirstLight 依赖由使用者另行获取，`upstream.lock.json` 记录测试版本和相关文件指纹。
 冻结的是推理兼容基线，不要求用户复制开发者的离线引擎安装配置。
 

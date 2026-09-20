@@ -14,10 +14,58 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 from bridge.adb_runtime import resolve_and_store
 
-GAME_SHA = '110aa2b5cac391c498645e072b0d88729428c2c2845e7e2737ca8ee979059783'
-PROBE_SHA = '91f3719b4bd4d5e9f0f034fbdd823fb3b0676c52e88f6f621ed416cf763114c4'
-# Default to the rebuilt probe with persistent GameApp bootstrap retries.
-PROBE = config.BASE_DIR / 'probe/artifacts/candidates/stable-retry/libscid_sdk.so'
+STABLE_PROBE_MANIFEST = config.BASE_DIR / 'probe/stable_probe.json'
+
+
+def _load_stable_probe_manifest():
+    if not STABLE_PROBE_MANIFEST.is_file():
+        raise ValueError(
+            f'Stable Probe manifest is missing: {STABLE_PROBE_MANIFEST}'
+        )
+
+    data = json.loads(
+        STABLE_PROBE_MANIFEST.read_text(encoding='utf-8')
+    )
+
+    if data.get('schema') != 'royaleharness.stable-probe.v1':
+        raise ValueError('Unsupported Stable Probe manifest schema')
+    if data.get('profile') != 'stable':
+        raise ValueError('Stable Probe manifest profile mismatch')
+    if data.get('validation') != 'previously_live_validated_binary':
+        raise ValueError('Stable Probe is not marked live validated')
+
+    relative = Path(str(data.get('path', '')))
+
+    if (
+        not relative.parts
+        or relative.is_absolute()
+        or '..' in relative.parts
+    ):
+        raise ValueError('Invalid Stable Probe manifest path')
+
+    for field in ('sha256', 'game_sha256'):
+        value = data.get(field)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(c not in '0123456789abcdefABCDEF' for c in value)
+        ):
+            raise ValueError(
+                f'Invalid Stable Probe manifest {field}'
+            )
+
+    return data
+
+
+_STABLE_PROBE = _load_stable_probe_manifest()
+
+GAME_SHA = _STABLE_PROBE['game_sha256'].lower()
+PROBE_SHA = _STABLE_PROBE['sha256'].lower()
+PROBE = (
+    config.BASE_DIR
+    / 'probe'
+    / Path(_STABLE_PROBE['path'])
+)
 
 
 def digest(path):
@@ -45,6 +93,31 @@ def verify_probe(path):
         raise ValueError('Probe is missing the expected RoyaleHarness proxy markers')
     if b'libscid_sdk.so' not in data:
         raise ValueError('Probe is missing the expected SDK proxy name')
+
+
+
+def verify_pinned_probe():
+    """Verify the one release Stable Probe; never fall back to a candidate."""
+    if not PROBE.is_file():
+        raise ValueError(
+            'Pinned Stable Probe binary is missing: '
+            f'{PROBE}. '
+            'Use a RoyaleHarness release package containing the validated '
+            'Stable Probe, or restore the exact validated binary with '
+            f'SHA-256 {PROBE_SHA}. '
+            'Do not rename stable-candidate/stable-retry to Stable.'
+        )
+
+    actual = digest(PROBE)
+
+    if actual != PROBE_SHA:
+        raise ValueError(
+            'Pinned Stable Probe checksum mismatch: '
+            f'expected {PROBE_SHA}, got {actual}'
+        )
+
+    verify_probe(PROBE)
+    return actual
 
 
 class Adb:
@@ -96,12 +169,13 @@ def pull_root(adb, remote, destination):
 def install(adb, restore=False, probe_path=None):
     selected_probe = Path(probe_path).expanduser().absolute() if probe_path is not None else PROBE
     if not restore:
-        if not selected_probe.is_file():
-            raise ValueError(f'Probe file does not exist: {selected_probe}')
         if selected_probe == PROBE:
-            if digest(selected_probe) != PROBE_SHA:
-                raise ValueError('Pinned probe checksum mismatch')
+            verify_pinned_probe()
         else:
+            if not selected_probe.is_file():
+                raise ValueError(
+                    f'Probe file does not exist: {selected_probe}'
+                )
             verify_probe(selected_probe)
     directory = game_directory(adb)
     # Never share backups between instances or app reinstall directories.
@@ -176,10 +250,13 @@ def main():
     if args.check:
         selected_probe = args.probe_path.expanduser().absolute() if args.probe_path is not None else PROBE
         if selected_probe == PROBE:
-            if digest(selected_probe) != PROBE_SHA:
-                raise ValueError('Pinned probe checksum mismatch')
+            verify_pinned_probe()
             profile = 'stable'
         else:
+            if not selected_probe.is_file():
+                raise ValueError(
+                    f'Probe file does not exist: {selected_probe}'
+                )
             verify_probe(selected_probe)
             profile = 'candidate'
         print(json.dumps({'profile': profile, 'sha256': digest(selected_probe), 'game_sha256': GAME_SHA}))

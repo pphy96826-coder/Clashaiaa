@@ -21,6 +21,20 @@
 
 发行包包含本项目源码与稳定探针，不包含模型权重、上游目录资源、游戏 APK 或原始 SDK。
 
+
+> **Stable Probe 说明**
+>
+> 正式 Stable Probe 只有一个定义：`probe/stable_probe.json`。
+> 当前验证过的文件是
+> `probe/artifacts/stable/libscid_sdk.so`，SHA-256 为
+> `9d1c8d79712c7116e27c324dd9bcbd85d6be07923e7c8b989c61bee57cd095b0`。
+> `stable-candidate` 与历史 `stable-retry` 都不是 `v0.1.0-preview`
+> 的正式 Stable。不要通过重命名候选文件或修改哈希来绕过检查。
+>
+> GitHub 源码 checkout 如果没有预编译 Stable `.so`，不能直接执行默认 Probe
+> 安装；请使用包含该验证二进制的正式发布包，或由维护者恢复完全相同哈希的 Stable
+> 二进制。重新构建只生成 candidate，除非结果与已验证 Stable 逐字节一致，否则不能晋升。
+
 ## 快速开始
 
 以下命令在**发布目录**中执行。目录名称可自定；压缩包内目前保留
@@ -133,6 +147,21 @@ workspace/
 手动命令行支持 `--account-id`、`--device`、`--dry-run` 等；详见 `main.py --help`。
 
 ### 连续对战与控制台
+
+桌面控制台可直接启动：
+
+```bash
+./desktop_console.command
+```
+
+窗口会保存 checkpoint、device、连续对战、最大局数、启动方式和日志路径到
+`desktop_console.local.json`（该文件只保存在本机，不提交到仓库）。启动方式可选
+“启动新对局”或“接管当前对局”；运行中窗口显示 PID、stdout/stderr、
+关键事件和滚动日志，并提供安全停止与强制停止。窗口中的 Python 解释器优先使用
+已保存路径或 `CR_AGENT_PYTHON`，启动前会验证 `native_runner` 与 `torch` 是否能导入；
+勾选“自动发表情”后，Agent 会在对局中按现有生命周期节奏自动发送表情。
+
+也可以在 Finder 中双击 `desktop_console.command`，把它拖到桌面即可作为快捷方式使用。
 
 在已验证的 MuMu 实例上，使用 `--continuous --console` 可自动处理结算页、
 回到大厅并开启下一局。控制台命令在运行中输入：

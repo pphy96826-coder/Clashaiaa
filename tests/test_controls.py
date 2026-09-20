@@ -7,9 +7,74 @@ from unittest.mock import Mock, call, patch
 from live_lifecycle import LiveLifecycle, LifecycleError
 from main import parse_args
 from runtime_console import AgentConsole, ConsoleCommand
+from desktop_console import (
+    ConsoleConfig, build_runner_command, config_from_dict, load_config,
+    resolve_agent_python, save_config, validate_agent_python,
+)
 
 
 class ConsoleTests(unittest.TestCase):
+    def test_runner_command_builds_selected_modes(self):
+        command = build_runner_command(
+            ConsoleConfig(
+                checkpoint='general', device='cpu', continuous=True,
+                max_matches='3', launch_mode='attach', log_path='logs/ui.jsonl',
+            ),
+            root=Path('/repo'), python_executable=Path('/repo/.venv/bin/python'),
+        )
+        self.assertEqual(command, [
+            '/repo/.venv/bin/python', '-u', '/repo/main.py',
+            '--checkpoint', 'general', '--device', 'cpu', '--console',
+            '--continuous', '--max-matches', '3', '--attach-active',
+            '--log', 'logs/ui.jsonl',
+        ])
+
+    def test_runner_command_rejects_max_matches_without_continuous(self):
+        with self.assertRaisesRegex(ValueError, 'continuous'):
+            build_runner_command(ConsoleConfig(continuous=False, max_matches='1'))
+
+    def test_runner_command_uses_start_battle_by_default(self):
+        command = build_runner_command(
+            ConsoleConfig(device='cpu', continuous=False, launch_mode='start'),
+            root=Path('/repo'), python_executable='/usr/bin/python3',
+        )
+        self.assertIn('--start-battle', command)
+        self.assertNotIn('--continuous', command)
+
+    def test_console_config_round_trip_is_json_and_ignores_unknown_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'console.json'
+            expected = ConsoleConfig(
+                checkpoint='general', device='mps', continuous=False,
+                max_matches='', launch_mode='attach', log_path='/tmp/live.jsonl',
+                agent_python='/tmp/agent-python', auto_emotes=True,
+            )
+            save_config(expected, path)
+            raw = json.loads(path.read_text(encoding='utf-8'))
+            raw['future_field'] = 'ignored'
+            path.write_text(json.dumps(raw), encoding='utf-8')
+            self.assertEqual(load_config(path), expected)
+
+    def test_agent_python_prefers_saved_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'python'
+            executable.write_text('#!/bin/sh\n', encoding='utf-8')
+            executable.chmod(0o755)
+            self.assertEqual(resolve_agent_python(str(executable), Path(directory)), str(executable))
+
+    @patch('desktop_console.subprocess.run')
+    def test_agent_python_validation_reports_import_failure(self, run):
+        run.return_value = Mock(returncode=1, stderr='ModuleNotFoundError: native_runner', stdout='')
+        error = validate_agent_python('/tmp/agent-python', Path('/repo'))
+        self.assertIn('native_runner', error)
+        self.assertIn('native_runner', run.call_args.args[0][2])
+
+    def test_config_from_dict_falls_back_for_invalid_values(self):
+        loaded = config_from_dict({'continuous': 'yes', 'launch_mode': 'invalid', 'device': 3})
+        self.assertEqual(loaded.continuous, ConsoleConfig.continuous)
+        self.assertEqual(loaded.launch_mode, 'start')
+        self.assertEqual(loaded.device, ConsoleConfig.device)
+
     def test_parse_commands_and_comments(self):
         self.assertEqual(AgentConsole.parse(' model general '),
                          ConsoleCommand('model', ('general',)))
@@ -48,6 +113,95 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaises(LifecycleError):
                 lifecycle.return_to_lobby()
         lifecycle._tap.assert_not_called()
+
+    def test_unknown_screen_accepts_probe_confirmed_idle_lobby(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': False,
+        }))
+        lifecycle.calibration = {}
+        lifecycle._tap = Mock()
+        with patch('bridge.lifecycle_screen.read_screen',
+                   return_value=('unknown', None)), \
+                patch('live_lifecycle.time.sleep'):
+            lifecycle.return_to_lobby(timeout_seconds=5)
+        lifecycle._tap.assert_not_called()
+        self.assertIn(
+            call('lobby_ready', mode='continuous',
+                 evidence='probe_idle_unknown_screen', samples=2),
+            lifecycle.log.call_args_list)
+
+    def test_unknown_active_probe_still_rejected_without_terminal(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': True,
+        }))
+        lifecycle.calibration = {'continue_button': (540, 1710)}
+        lifecycle._tap = Mock()
+
+        with patch('bridge.lifecycle_screen.read_screen',
+                   return_value=('unknown', None)), \
+                patch('live_lifecycle.time.sleep'):
+            with self.assertRaisesRegex(
+                    LifecycleError, 'Active battle detected'):
+                lifecycle.return_to_lobby(timeout_seconds=5)
+
+        lifecycle._tap.assert_not_called()
+
+    def test_terminal_confirmed_ignores_stale_active_probe_and_recovers(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.post_result_delay = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': True,
+            'battle_result': {'finalized': True},
+        }))
+        lifecycle.calibration = {'continue_button': (540, 1710)}
+        lifecycle._tap = Mock()
+
+        with patch('bridge.lifecycle_screen.read_screen', side_effect=[
+                ('unknown', None), ('unknown', None),
+                ('lobby', (540, 1490)), ('lobby', (540, 1490))]), \
+                patch('live_lifecycle.time.sleep'):
+            lifecycle.return_to_lobby(
+                timeout_seconds=5,
+                terminal_confirmed=True,
+            )
+
+        lifecycle._tap.assert_called_once_with(
+            (540, 1710), 'unknown-result-dismiss')
+        self.assertIn(
+            call(
+                'lobby_probe_stale_active_after_terminal',
+                evidence='native_world_finalized',
+                samples=2,
+            ),
+            lifecycle.log.call_args_list,
+        )
+
+    def test_unknown_result_gets_one_configured_recovery_tap(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.post_result_delay = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': False,
+            'battle_result': {'finalized': True},
+        }))
+        lifecycle.calibration = {'continue_button': (540, 1710)}
+        lifecycle._tap = Mock()
+        with patch('bridge.lifecycle_screen.read_screen', side_effect=[
+                ('unknown', None), ('unknown', None),
+                ('lobby', (540, 1490)), ('lobby', (540, 1490))]), \
+                patch('live_lifecycle.time.sleep'):
+            lifecycle.return_to_lobby(timeout_seconds=5)
+        lifecycle._tap.assert_called_once_with(
+            (540, 1710), 'unknown-result-dismiss')
 
     def test_screen_reader_rejects_active_battle_and_reward_claims(self):
         from bridge.lifecycle_screen import classify

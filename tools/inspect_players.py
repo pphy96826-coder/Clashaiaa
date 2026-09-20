@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import sys
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
@@ -13,7 +14,16 @@ def main():
     adb = Adb()
     adb.call('forward', f'tcp:{config.PROBE_PORT}', f'tcp:{config.PROBE_DEVICE_PORT}')
     client = ProbeClient(port=config.PROBE_PORT)
-    raw = client.query()
+    # This tool is intentionally used after the operator has already entered
+    # a manual battle. Adopt that live controller explicitly; GET alone cannot
+    # cross the probe's stale-result/previous-battle lifecycle barrier.
+    client.attach_live_context()
+    raw = None
+    for _ in range(10):
+        raw = client.query()
+        if raw is not None and raw.get('in_battle'):
+            break
+        time.sleep(0.05)
     if raw is None:
         raise RuntimeError(client.last_error)
     if not raw.get('in_battle'):

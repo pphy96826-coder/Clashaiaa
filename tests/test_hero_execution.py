@@ -1,12 +1,16 @@
 import copy
+import json
+from pathlib import Path
+import tempfile
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 import unittest
 
-import test_ability_state
+from tests import test_ability_state
 from agent.execution import ActionExecutor
 from bridge.probe_client import ProbeClient
-from bridge.hero_execution import ABILITY
+from bridge.hero_execution import ABILITY, ability_button, ensure_ability_calibration
 from native_runner.contracts import ActionV1, ActionKind
 
 
@@ -62,8 +66,15 @@ class HeroExecutionTests(unittest.TestCase):
         self.executor.future.result(timeout=2)
         self.actuator.activate_ability.assert_called_once()
         self.actuator.deploy_action.assert_not_called()
+        # The executor records input_completed_at and moves the sent action
+        # into ack_watch only on the next poll. Reconcile once with the same
+        # pre-input snapshot; that frame must not be allowed to ACK the skill.
+        self.executor.poll(self.state, lambda a,s: True)
+        self.assertEqual(len(self.executor.ack_watch), 1)
         self.raw['players'][0]['ability_runtime'][0].update(charges=0, button_state=6)
         self.state.tick += 1
+        # Now model the genuinely newer authoritative probe frame.
+        self.state.received_at = time.perf_counter()
         self.executor.poll(self.state, lambda a,s: True)
         self.assertFalse(self.executor.pending)
         self.assertIn('ability_ack', [n for n,_ in self.events])
@@ -77,9 +88,17 @@ class HeroExecutionTests(unittest.TestCase):
         self.executor.submit(SimpleNamespace(actions=(self.action,)), self.state)
         self.executor.poll(self.state, lambda a,s: True)
         self.executor.future.result(timeout=2)
+        # First reconcile input completion with the unchanged pre-input
+        # snapshot so the sent action is transferred to ack_watch.
+        self.executor.poll(self.state, lambda a,s: True)
+        self.assertEqual(len(self.executor.ack_watch), 1)
         self.raw['players'][0]['ability_runtime'][0].update(members=[5000041], charges=0)
-        self.executor.pending[0].sent_at -= 5
+        # Ability ACK timeout starts when the Android input transaction
+        # completes, not when it was submitted. Age that exact clock and
+        # provide a newer probe frame.
+        self.executor.ack_watch[0].input_completed_at -= 5
         self.state.tick += 1
+        self.state.received_at = time.perf_counter()
         self.executor.poll(self.state, lambda a,s: True)
         self.assertNotIn('ability_ack', [n for n,_ in self.events])
         self.assertIn('ability_ack_timeout', [n for n,_ in self.events])
@@ -126,7 +145,7 @@ class HeroExecutionTests(unittest.TestCase):
         self.assertFalse(agent._validate_action(action, self.state))
 
     def test_skill_and_card_share_elixir_and_keep_input_types_separate(self):
-        from test_pipeline import play
+        from tests.test_pipeline import play
         self.state.elixir = 3
         self.executor.submit(SimpleNamespace(actions=(self.action, play())), self.state)
         self.assertEqual(len(self.executor.pending), 1)
@@ -134,7 +153,7 @@ class HeroExecutionTests(unittest.TestCase):
 
     def test_hero_spawn_ack_joins_variant_id_through_native_controller(self):
         from dataclasses import replace
-        from test_pipeline import play
+        from tests.test_pipeline import play
         action = replace(play(slot=1, card=26000014),
             metadata={'policy_effective_cost':4., 'policy_effective_form_code':2})
         self.executor.submit(SimpleNamespace(actions=(action,)), self.state)
@@ -159,7 +178,7 @@ class HeroExecutionTests(unittest.TestCase):
 
     def test_actuator_does_not_tap_a_card_into_skill_button(self):
         from bridge.actuator import Actuator
-        from test_pipeline import play
+        from tests.test_pipeline import play
         actuator = Actuator(guard_hero_hud=True)
         actuator.size = (1080, 1920)
         actuator._command = Mock()
@@ -183,6 +202,55 @@ class HeroExecutionTests(unittest.TestCase):
         _, obs = adapter.tensorize(self.state)
         self.assertFalse(obs.action_mask.hand_slots[1])
         self.assertFalse(adapter.hero_musketeer)
+
+    def test_missing_ability_calibration_bootstraps_measured_button(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ability_calibration.local.json'
+
+            point, generated = ensure_ability_calibration(
+                path, (1080, 1920))
+
+            self.assertTrue(generated)
+            self.assertEqual(point, (940, 1480))
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            self.assertTrue(payload['verified'])
+            self.assertEqual(payload['ability_id'], ABILITY)
+            self.assertEqual(payload['controller_slot'], 1)
+            self.assertEqual(payload['source'],
+                             'measured_single_controller_hud_v1')
+            self.assertEqual(
+                ability_button(path, (1080, 1920)),
+                (940, 1480),
+            )
+
+    def test_existing_ability_calibration_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ability.json'
+            payload = {
+                'ability_id': ABILITY,
+                'controller_slot': 1,
+                'verified': True,
+                'size': [1080, 1920],
+                'point': [950, 1490],
+            }
+            path.write_text(json.dumps(payload), encoding='utf-8')
+
+            point, generated = ensure_ability_calibration(
+                path, (1080, 1920))
+
+            self.assertFalse(generated)
+            self.assertEqual(point, (950, 1490))
+            self.assertEqual(
+                json.loads(path.read_text(encoding='utf-8')),
+                payload,
+            )
+
+    def test_auto_ability_calibration_rejects_changed_aspect_ratio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ability.json'
+            with self.assertRaisesRegex(ValueError, 'aspect ratio'):
+                ensure_ability_calibration(path, (1000, 1000))
+            self.assertFalse(path.exists())
 
     def test_unavailable_button_calibration_keeps_hero_deploy_but_disables_skill(self):
         self.adapter.hero_skill_ready = False
