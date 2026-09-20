@@ -629,8 +629,8 @@ class ActionExecutor:
             # Exact roots give a stable id.  Fallback groups include a broad
             # anchor bucket; matching also uses lane/card signature/anchor so
             # a bucket boundary cannot merge unrelated reservations.
-            bucket_x = int(anchor_x // 4000.0)
-            bucket_y = int(anchor_y // 4000.0)
+            bucket_x = int(anchor_x // 2500.0)
+            bucket_y = int(anchor_y // 2500.0)
             group_id = (
                 f"{lane}|{bucket_x}:{bucket_y}|"
                 + '|'.join(source_tokens)

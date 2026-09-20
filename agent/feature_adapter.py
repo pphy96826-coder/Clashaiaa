@@ -4194,26 +4194,33 @@ class FeatureAdapter:
                 assigned_counter is not None
                 and incoming_push is None
             ):
+                assigned_entry = entry
                 if int(cid) in DEFENSIVE_LANE_CARDS:
-                    entry = self._mask_to_lane(
+                    assigned_entry = self._mask_to_lane(
                         entry,
                         assigned_counter['threat_group_lane'],
                         'counter_assignment_lane',
                     )
                 elif int(cid) == FIREBALL:
-                    entry = self._mask_spell_near_point(
+                    assigned_entry = self._mask_spell_near_point(
                         entry,
                         assigned_counter['anchor_x'],
                         assigned_counter['anchor_y'],
                         DEFENSIVE_FIREBALL_TARGET_RADIUS,
                         'counter_assignment',
                     )
-                entry['counter_assignment_group_id'] = (
-                    assigned_counter['threat_group_id'])
-                entry['counter_assignment_score'] = (
-                    assigned_counter['score'])
-                entry['counter_assignment_scarcity_margin'] = (
-                    assigned_counter['scarcity_margin'])
+
+                if any(any(row) for row in assigned_entry['row_major']):
+                    entry = assigned_entry
+                    entry['counter_assignment_group_id'] = (
+                        assigned_counter['threat_group_id'])
+                    entry['counter_assignment_score'] = (
+                        assigned_counter['score'])
+                    entry['counter_assignment_scarcity_margin'] = (
+                        assigned_counter['scarcity_margin'])
+                else:
+                    entry['counter_assignment_unenforceable_group_id'] = (
+                        assigned_counter['threat_group_id'])
 
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
