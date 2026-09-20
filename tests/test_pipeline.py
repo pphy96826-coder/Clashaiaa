@@ -718,6 +718,193 @@ class AdapterTests(unittest.TestCase):
             )
         )
 
+    def test_single_one_elixir_threat_holds_core_defense(self):
+        raw = opening()
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+            26000010,  # Skeletons
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'single-spirit-core-hold')
+        s.elixir = 7.0
+        add_enemy(
+            s, 9324, 3500, 11000,
+            card_id=26000030, hp=190,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'defend',
+        )
+        self.assertTrue(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_active'])
+        self.assertEqual(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_card_id'],
+            26000030,
+        )
+        for slot in (0, 1, 2):
+            self.assertFalse(o.action_mask.hand_slots[slot])
+            self.assertEqual(
+                o.action_mask.reasons['slot_reasons'][str(slot)],
+                'strategy_hold_core_defense_for_low_value_threat',
+            )
+        self.assertTrue(o.action_mask.hand_slots[3])
+        self.assertTrue(o.action_mask.kinds['wait'])
+
+    def test_single_one_elixir_threat_overflow_only_forces_cheap_cycle(self):
+        raw = opening()
+        hand = (
+            26000010,  # Skeletons
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'single-spirit-overflow-cycle')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9325, 3500, 11000,
+            card_id=26000030, hp=190,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_active'])
+        self.assertTrue(
+            o.action_mask.reasons['defense_overflow_active'])
+        self.assertTrue(
+            o.action_mask.reasons['defense_overflow_forced'])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_mode'],
+            'low_value_defense_cycle',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (0,),
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertFalse(o.action_mask.hand_slots[3])
+
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000010)
+        self.assertEqual(
+            fallback.metadata['defense_overflow_mode'],
+            'low_value_defense_cycle',
+        )
+
+    def test_single_one_elixir_threat_without_cheap_answer_can_wait_at_cap(self):
+        raw = opening()
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+            26000038,  # Ice Golem
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'single-spirit-overflow-wait')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9326, 3500, 11000,
+            card_id=26000030, hp=190,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_active'])
+        self.assertTrue(
+            o.action_mask.reasons['defense_overflow_active'])
+        self.assertFalse(
+            o.action_mask.reasons['defense_overflow_forced'])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            ())
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_mode'],
+            'low_value_defense_cycle',
+        )
+        self.assertEqual(
+            o.action_mask.hand_slots,
+            (False, False, False, False),
+        )
+        self.assertTrue(o.action_mask.kinds['wait'])
+        self.assertIsNone(
+            a.defense_overflow_fallback(s, o)
+        )
+
+    def test_low_value_gate_yields_to_tracked_heavy_push(self):
+        a, s = self.adapter()
+        s.elixir = 10.0
+        add_enemy(
+            s, 9327, 3500, 24000,
+            card_id=26000003, hp=3000,
+        )
+        s.tick += 1
+        a.tensorize(s)
+
+        add_enemy(
+            s, 9328, 14500, 11000,
+            card_id=26000030, hp=190,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertEqual(
+            o.action_mask.reasons['strategy_phase'],
+            'defend',
+        )
+        self.assertTrue(
+            o.action_mask.reasons['incoming_push_active'])
+        self.assertFalse(
+            o.action_mask.reasons[
+                'low_value_defensive_threat_active'])
+
     def test_live_defense_overflow_disables_wait_and_offensive_hog(self):
         a, s = self.adapter()
 

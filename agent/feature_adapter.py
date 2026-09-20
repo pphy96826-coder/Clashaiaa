@@ -104,6 +104,13 @@ BACKFIELD_CANNON_RELEASE_DEPTH = 12500.0
 DEFENSE_OVERFLOW_ELIXIR = 9.5
 DEFENSE_OVERFLOW_HARD_CAP_ELIXIR = 9.9
 DEFENSE_OVERFLOW_SAFE_CYCLE_CARDS = frozenset((SKELETONS, ICE_SPIRIT))
+LOW_VALUE_DEFENSE_MAX_COST = 1.0
+LOW_VALUE_DEFENSE_HELD_CARDS = frozenset((
+    MUSKETEER, CANNON, FIREBALL, ICE_GOLEM,
+))
+LOW_VALUE_DEFENSE_OVERFLOW_CARDS = frozenset((
+    SKELETONS, ICE_SPIRIT, THE_LOG,
+))
 
 # Cannon may be placed before the tank reaches its final pull radius, provided
 # the observed approach says the tank should arrive while the building still
@@ -1656,6 +1663,57 @@ class FeatureAdapter:
                 return True
         return False
 
+    def _low_value_defensive_threat_context(
+            self, incoming_push=None, backfield_commitment=None):
+        """Return a lone one-elixir troop that should not consume core defense.
+
+        This gate is intentionally narrow.  Any tracked heavy push, meaningful
+        backfield commitment, second live enemy, unknown card identity, or
+        higher-cost threat disables it and restores the normal defense policy.
+        """
+        if incoming_push is not None or backfield_commitment is not None:
+            return None
+
+        enemy = []
+        for ent in self._live_entities.values():
+            if int(ent.get('owner', -1)) == self.actor_owner:
+                continue
+
+            card_id = int(ent.get('card_id', -1))
+            if card_id <= 0:
+                continue
+
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0:
+                continue
+
+            enemy.append(ent)
+
+        if len(enemy) != 1:
+            return None
+
+        ent = enemy[0]
+        depth = self._defensive_depth(ent['y'])
+        if depth > 14500.0:
+            return None
+
+        card_id = int(ent.get('card_id', -1))
+        spec = self.bundle.card_specs.get(card_id)
+        if spec is None or spec.elixir_cost is None:
+            return None
+
+        cost = float(spec.elixir_cost)
+        if cost > LOW_VALUE_DEFENSE_MAX_COST:
+            return None
+
+        return {
+            'entity_id': int(ent['id']),
+            'card_id': card_id,
+            'cost': cost,
+            'depth': float(depth),
+            'lane': 'left' if float(ent['x']) < 9000.0 else 'right',
+        }
+
     def _single_defensive_threat_lane(self):
         """Return one unambiguous enemy lane inside our defensive half."""
         enemy = []
@@ -2091,6 +2149,13 @@ class FeatureAdapter:
         elif mode == 'cannon_prebuild':
             priority = {
                 CANNON: 0,
+            }
+
+        elif mode == 'low_value_defense_cycle':
+            priority = {
+                SKELETONS: 0,
+                ICE_SPIRIT: 1,
+                THE_LOG: 2,
             }
 
         else:
@@ -2600,6 +2665,12 @@ class FeatureAdapter:
         )
         incoming_push = self._incoming_push_context()
         backfield_commitment = self._backfield_commitment_context()
+        low_value_defensive_threat = (
+            self._low_value_defensive_threat_context(
+                incoming_push=incoming_push,
+                backfield_commitment=backfield_commitment,
+            )
+        )
 
         preparing_for_push = (
             incoming_push is not None
@@ -2808,6 +2879,17 @@ class FeatureAdapter:
             defense_overflow_active)
         self.quality['neutral_overflow_active'] = bool(
             neutral_overflow_active)
+        self.quality['low_value_defensive_threat_active'] = bool(
+            low_value_defensive_threat)
+        self.quality['low_value_defensive_threat_card_id'] = (
+            low_value_defensive_threat.get('card_id')
+            if low_value_defensive_threat else None)
+        self.quality['low_value_defensive_threat_cost'] = (
+            low_value_defensive_threat.get('cost')
+            if low_value_defensive_threat else None)
+        self.quality['low_value_defensive_threat_entity_id'] = (
+            low_value_defensive_threat.get('entity_id')
+            if low_value_defensive_threat else None)
         last_exact = self._last_opponent_exact_play
         self.quality['opponent_last_exact_play_card_id'] = (
             last_exact.get('card_id') if last_exact else None)
@@ -2933,6 +3015,14 @@ class FeatureAdapter:
                 continue
             if cid == HOG_RIDER and attack_hold is not None:
                 slot_reasons[str(slot)] = 'strategy_hold_attack_defense'
+                continue
+            if (
+                low_value_defensive_threat is not None
+                and cid in LOW_VALUE_DEFENSE_HELD_CARDS
+            ):
+                slot_reasons[str(slot)] = (
+                    'strategy_hold_core_defense_for_low_value_threat'
+                )
                 continue
             if (defending_incoming_push
                     and cid == CANNON
@@ -3303,20 +3393,32 @@ class FeatureAdapter:
                     defense_overflow_forced = True
 
             elif strategy_phase == 'defend':
-                legal = [
-                    slot
-                    for slot in range(4)
-                    if playable[slot]
-                    and int(slots.get(slot, -1))
-                        != HOG_RIDER
-                ]
+                if low_value_defensive_threat is not None:
+                    legal = [
+                        slot
+                        for slot in range(4)
+                        if playable[slot]
+                        and int(slots.get(slot, -1))
+                            in LOW_VALUE_DEFENSE_OVERFLOW_CARDS
+                    ]
+                    defense_overflow_mode = (
+                        'low_value_defense_cycle'
+                    )
+                else:
+                    legal = [
+                        slot
+                        for slot in range(4)
+                        if playable[slot]
+                        and int(slots.get(slot, -1))
+                            != HOG_RIDER
+                    ]
+                    defense_overflow_mode = (
+                        'live_defense'
+                    )
 
                 if legal:
                     defense_overflow_safe_slots = sorted(
                         legal)
-                    defense_overflow_mode = (
-                        'live_defense'
-                    )
                     defense_overflow_forced = True
 
         self.quality['defense_overflow_forced'] = bool(
@@ -3396,6 +3498,17 @@ class FeatureAdapter:
                          defense_overflow_active),
                      'neutral_overflow_active': bool(
                          neutral_overflow_active),
+                     'low_value_defensive_threat_active': bool(
+                         low_value_defensive_threat),
+                     'low_value_defensive_threat_card_id': (
+                         low_value_defensive_threat.get('card_id')
+                         if low_value_defensive_threat else None),
+                     'low_value_defensive_threat_cost': (
+                         low_value_defensive_threat.get('cost')
+                         if low_value_defensive_threat else None),
+                     'low_value_defensive_threat_entity_id': (
+                         low_value_defensive_threat.get('entity_id')
+                         if low_value_defensive_threat else None),
                      'defense_overflow_hard_cap': bool(
                          defense_overflow_hard_cap),
                      'defense_overflow_forced': bool(
