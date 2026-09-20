@@ -5,6 +5,7 @@ from agent.feature_adapter import FeatureAdapter, TelemetryError
 from bridge.probe_client import ProbeClient
 from bridge.runtime_state import attack_state, attack_events
 from native_runner.contracts import AttackPhase
+from main import _should_reattach_active_battle
 
 
 def combatant():
@@ -18,6 +19,18 @@ def combatant():
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_active_battle_idle_probe_state_is_sticky_until_native_terminal(self):
+        self.assertTrue(
+            _should_reattach_active_battle('live-match-1', 'idle'))
+        self.assertTrue(
+            _should_reattach_active_battle('live-match-1', ' IDLE '))
+        self.assertFalse(
+            _should_reattach_active_battle(None, 'idle'))
+        self.assertFalse(
+            _should_reattach_active_battle('live-match-1', 'warming'))
+        self.assertFalse(
+            _should_reattach_active_battle('live-match-1', 'timeout'))
+
     def test_exact_attack_events_use_native_tick_and_do_not_invent_hit(self):
         e = combatant(); raw = e['attack_runtime']
         raw.update(history_schema='nulls-attack-history.v3', history_complete=True,
