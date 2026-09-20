@@ -8,7 +8,17 @@ from unittest.mock import Mock, patch
 import config
 from bridge.probe_client import ProbeClient
 from bridge.coordinates import ScreenCalibration, action_world, world_to_view
-from agent.feature_adapter import FeatureAdapter, HOG_26_DECK, TelemetryError
+from agent.feature_adapter import (
+    CANNON,
+    FIREBALL,
+    ICE_GOLEM,
+    ICE_SPIRIT,
+    SKELETONS,
+    THE_LOG,
+    FeatureAdapter,
+    HOG_26_DECK,
+    TelemetryError,
+)
 from agent.execution import ActionExecutor
 from native_runner.contracts import ActionV1, ActionKind, TargetKind
 from native_runner.perspective import PerspectiveTransformV1
@@ -3228,6 +3238,126 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertIsNone(
             a.neutral_overflow_fallback(s, o)
+        )
+
+    def test_overflow_does_not_use_cannon_or_empty_log_as_cycle(self):
+        raw = opening()
+        hand = (CANNON, SKELETONS, THE_LOG, ICE_GOLEM)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'overflow-no-empty-spell')
+        s.elixir = 10.0
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertFalse(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[2])
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['0'],
+            'no_legal_position',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['slot_reasons']['2'],
+            'no_legal_position',
+        )
+        fallback = a.neutral_overflow_fallback(s, o)
+        self.assertEqual(fallback.card_id, SKELETONS)
+        self.assertEqual(
+            fallback.metadata['neutral_overflow_tactical_reason'],
+            'safe_backfield',
+        )
+
+    def test_neutral_cheap_overflow_follows_surviving_musketeer_lane(self):
+        raw = opening()
+        hand = (SKELETONS, CANNON, THE_LOG, ICE_GOLEM)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        s.entities.append({
+            'id': 9610,
+            'owner': s.local_owner,
+            'card_id': 26000014,
+            'x': 3500,
+            'y': 6000,
+            'hp': 1000,
+            'max_hp': 1000,
+        })
+        a = FeatureAdapter()
+        a.reset_match(s, 'overflow-follow-musketeer')
+        s.elixir = 10.0
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+        fallback = a.neutral_overflow_fallback(s, o)
+
+        self.assertEqual(fallback.card_id, SKELETONS)
+        self.assertEqual(
+            fallback.metadata['neutral_overflow_tactical_reason'],
+            'follow_musketeer',
+        )
+        self.assertLess(fallback.target_grid[0], 9)
+
+    def test_far_incoming_push_has_no_forced_cycle_position(self):
+        raw = opening()
+        hand = (SKELETONS, CANNON, FIREBALL, THE_LOG)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'overflow-wait-far-push')
+        s.elixir = 10.0
+        add_enemy(s, 9611, 3500, 26000, card_id=26000003, hp=3000)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertFalse(o.action_mask.reasons['defense_overflow_forced'])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (),
+        )
+        self.assertIsNone(a.defense_overflow_fallback(s, o))
+
+    def test_live_defense_log_fallback_requires_a_measured_target(self):
+        raw = opening()
+        hand = (THE_LOG, CANNON, FIREBALL, ICE_GOLEM)
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid} for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK if cid not in hand
+        ]
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'overflow-log-target')
+        s.elixir = 10.0
+        add_enemy(s, 9612, 3500, 11000, card_id=26000021, hp=1400)
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+        fallback = a.defense_overflow_fallback(s, o)
+
+        self.assertEqual(fallback.card_id, THE_LOG)
+        x, y = action_world(fallback)
+        self.assertLessEqual(((x - 3500) ** 2 + (y - 11000) ** 2) ** 0.5, 3200.0)
+        self.assertEqual(
+            fallback.metadata['defense_overflow_tactical_reason'],
+            'log_value',
         )
 
     def test_defensive_pressure_immediately_releases_neutral_patience(self):

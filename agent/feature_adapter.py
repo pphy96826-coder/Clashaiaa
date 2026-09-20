@@ -113,6 +113,18 @@ DEFENSE_OVERFLOW_HARD_CAP_ELIXIR = 9.9
 DEFENSE_OVERFLOW_SAFE_CYCLE_CARDS = frozenset((
     SKELETONS, ICE_SPIRIT, THE_LOG,
 ))
+# Overflow is allowed to spend only into a position that has a job.  These
+# bands are deliberately conservative: a backfield cycle is a safe rotation
+# point, not a reason to drop a card in front of the princess tower.
+OVERFLOW_SAFE_BACKFIELD_MIN_DEPTH = 4500.0
+OVERFLOW_SAFE_BACKFIELD_MAX_DEPTH = 8000.0
+OVERFLOW_CHEAP_ENEMY_RADIUS = {
+    SKELETONS: 5200.0,
+    ICE_SPIRIT: 5000.0,
+    ICE_GOLEM: 6500.0,
+}
+OVERFLOW_LOG_TARGET_RADIUS = 3200.0
+OVERFLOW_SUPPORT_LATERAL_RADIUS = 3500.0
 LOW_VALUE_DEFENSE_MAX_COST = 1.0
 LOW_VALUE_DEFENSE_HELD_CARDS = frozenset((
     MUSKETEER, CANNON, FIREBALL, ICE_GOLEM,
@@ -2588,6 +2600,246 @@ class FeatureAdapter:
         masked[f'{metadata_prefix}_target_count'] = len(points)
         return masked
 
+    def _overflow_entities(self, *, own=False, max_depth=None):
+        """Return live troop/building anchors usable by overflow placement.
+
+        The overflow path is intentionally less ambitious than the policy. It
+        must never invent a reason to spend elixir from a bare legal mask, so
+        only current live entities are used as anchors here.
+        """
+        rows = []
+        for ent in self._live_entities.values():
+            owner = int(ent.get('owner', -1))
+            if own != (owner == self.actor_owner):
+                continue
+            cid = int(ent.get('card_id', -1))
+            spec = self.bundle.card_specs.get(cid)
+            if spec is None or spec.kind.value not in ('troop', 'building'):
+                continue
+            hp = ent.get('hp')
+            if hp is not None and float(hp) <= 0.0:
+                continue
+            depth = self._defensive_depth(ent['y'])
+            if max_depth is not None and depth > float(max_depth):
+                continue
+            x, y = float(ent['x']), float(ent['y'])
+            rows.append({
+                'entity_id': int(ent['id']),
+                'card_id': cid,
+                'x': x,
+                'y': y,
+                'depth': float(depth),
+                'lane': 'left' if x < 9000.0 else 'right',
+                'kind': spec.kind.value,
+            })
+        return rows
+
+    def _overflow_cell_world(self, entry, gx, gy):
+        subcell = entry.get('model_subcell_offset') or (0.0, 0.0)
+        dx = float(subcell[0] or 0.0)
+        dy = float(subcell[1] or 0.0)
+        sign = 1.0 if self.actor_owner == 0 else -1.0
+        return (
+            (float(gx) + 0.5 + sign * dx) * 1000.0,
+            (float(gy) + 0.5 + sign * dy) * 1000.0,
+        )
+
+    def _overflow_position_candidates(
+            self, card_id, entry, *, phase, lane=None, reasons=None):
+        """Score only overflow cells with a measured tactical purpose.
+
+        This is shared by the mask and both WAIT fallbacks.  A card can still
+        be legal under the normal policy, but the anti-overflow path is not
+        allowed to turn legality into a command by itself.
+        """
+        if not isinstance(entry, Mapping):
+            return []
+
+        cid = int(card_id)
+        reasons = reasons or {}
+        lane = lane or reasons.get('incoming_push_lane') or reasons.get(
+            'defensive_threat_lane')
+        enemy = self._overflow_entities(
+            own=False,
+            max_depth=22000.0 if phase == 'neutral' else 19000.0,
+        )
+        if lane in ('left', 'right'):
+            enemy = [row for row in enemy if row['lane'] == lane]
+        support = self._overflow_entities(own=True, max_depth=15000.0)
+        musketeers = [row for row in support if row['card_id'] == MUSKETEER]
+
+        # Cannon is a defensive anchor, never a neutral cycle card.  During a
+        # preparation phase its measured incoming-push lane/ETA is sufficient;
+        # otherwise it needs a current enemy in the defensive half.
+        cannon_prepare = bool(
+            reasons.get('incoming_push_active')
+            and reasons.get('cannon_prebuild_allowed')
+        )
+        if cid == CANNON:
+            if phase == 'neutral' or (not enemy and not cannon_prepare):
+                return []
+            anchors = enemy or [
+                row for row in self._overflow_entities(own=False)
+                if lane is None or row['lane'] == lane
+            ]
+            if not anchors:
+                return []
+            preferred_depth = 8000.0
+            if reasons.get('incoming_push_depth') is not None:
+                preferred_depth = min(
+                    10500.0,
+                    max(5500.0, float(reasons['incoming_push_depth']) - 3500.0),
+                )
+            result = []
+            for gy, row in enumerate(entry['row_major']):
+                for gx, allowed in enumerate(row):
+                    if not allowed:
+                        continue
+                    wx, wy = self._overflow_cell_world(entry, gx, gy)
+                    cell_lane = 'left' if wx < 9000.0 else 'right'
+                    if lane in ('left', 'right') and cell_lane != lane:
+                        continue
+                    depth = self._defensive_depth(wy)
+                    if not 4500.0 <= depth <= 11500.0:
+                        continue
+                    distance = min(
+                        self._distance((wx, wy), (row['x'], row['y']))
+                        for row in anchors
+                    )
+                    score = (
+                        distance ** 2
+                        + 0.35 * (depth - preferred_depth) ** 2
+                    )
+                    result.append((score, gx, gy, 'cannon_anchor'))
+            return result
+
+        if cid == THE_LOG:
+            # Log is a swept line, but a target-free roll is still wasted
+            # elixir.  Require a measured body/building close to the selected
+            # impact cell; lead_log_action can refine a moving target later.
+            if not enemy:
+                return []
+            result = []
+            for gy, row in enumerate(entry['row_major']):
+                for gx, allowed in enumerate(row):
+                    if not allowed:
+                        continue
+                    wx, wy = self._overflow_cell_world(entry, gx, gy)
+                    cell_lane = 'left' if wx < 9000.0 else 'right'
+                    if lane in ('left', 'right') and cell_lane != lane:
+                        continue
+                    nearest = min(
+                        self._distance((wx, wy), (target['x'], target['y']))
+                        for target in enemy
+                    )
+                    if nearest <= OVERFLOW_LOG_TARGET_RADIUS:
+                        result.append((nearest ** 2, gx, gy, 'log_value'))
+            return result
+
+        if cid not in (SKELETONS, ICE_SPIRIT, ICE_GOLEM):
+            return []
+
+        # A live enemy gives cheap control a real kite/freeze/body job.  A
+        # surviving Musketeer gives it a same-lane follow/protection job.
+        tactical_enemy = list(enemy)
+        tactical_support = list(musketeers)
+        safe_backfield = (
+            phase == 'neutral'
+            and not tactical_enemy
+            and not tactical_support
+        )
+        if not tactical_enemy and not tactical_support and not safe_backfield:
+            return []
+
+        enemy_radius = OVERFLOW_CHEAP_ENEMY_RADIUS[cid]
+        result = []
+        for gy, row in enumerate(entry['row_major']):
+            for gx, allowed in enumerate(row):
+                if not allowed:
+                    continue
+                wx, wy = self._overflow_cell_world(entry, gx, gy)
+                cell_lane = 'left' if wx < 9000.0 else 'right'
+                if lane in ('left', 'right') and cell_lane != lane:
+                    continue
+                depth = self._defensive_depth(wy)
+                choices = []
+
+                for target in tactical_enemy:
+                    if cell_lane != target['lane']:
+                        continue
+                    distance = self._distance((wx, wy), (target['x'], target['y']))
+                    if distance > enemy_radius:
+                        continue
+                    desired_depth = target['depth']
+                    if cid in (SKELETONS, ICE_SPIRIT):
+                        desired_depth = max(3500.0, target['depth'] - 1800.0)
+                    else:
+                        desired_depth = max(4500.0, target['depth'] - 2500.0)
+                    choices.append((
+                        distance ** 2
+                        + 0.4 * (depth - desired_depth) ** 2,
+                        'kite',
+                    ))
+
+                for body in tactical_support:
+                    if cell_lane != body['lane']:
+                        continue
+                    lateral = abs(wx - body['x'])
+                    if lateral > OVERFLOW_SUPPORT_LATERAL_RADIUS:
+                        continue
+                    if cid == ICE_GOLEM:
+                        in_depth = body['depth'] - 2500.0 <= depth <= body['depth'] + 4500.0
+                    else:
+                        in_depth = body['depth'] - 5000.0 <= depth <= body['depth'] + 2500.0
+                    if not in_depth:
+                        continue
+                    choices.append((
+                        self._distance((wx, wy), (body['x'], body['y'])) ** 2,
+                        'follow_musketeer',
+                    ))
+
+                if safe_backfield:
+                    # Keep a neutral cycle behind the tower and out of the
+                    # central tower-front pocket. This is a safe rotation,
+                    # not a claim that the card is an active defense.
+                    if (
+                        OVERFLOW_SAFE_BACKFIELD_MIN_DEPTH
+                        <= depth <= OVERFLOW_SAFE_BACKFIELD_MAX_DEPTH
+                        and abs(wx - 9000.0) >= 2000.0
+                    ):
+                        choices.append((
+                            (depth - 6000.0) ** 2
+                            + 0.15 * (abs(wx - 9000.0) - 4500.0) ** 2,
+                            'safe_backfield',
+                        ))
+
+                if choices:
+                    score, reason = min(choices)
+                    result.append((score, gx, gy, reason))
+        return result
+
+    def _mask_to_overflow_tactical_positions(
+            self, entry, card_id, *, phase, lane=None, reasons=None):
+        candidates = self._overflow_position_candidates(
+            card_id,
+            entry,
+            phase=phase,
+            lane=lane,
+            reasons=reasons,
+        )
+        if not candidates:
+            return None
+        allowed = {(int(gx), int(gy)) for _, gx, gy, _ in candidates}
+        masked = dict(entry)
+        masked['row_major'] = tuple(
+            tuple(bool(value) and (x, y) in allowed
+                  for x, value in enumerate(row))
+            for y, row in enumerate(entry['row_major'])
+        )
+        masked['overflow_tactical_positions'] = True
+        masked['overflow_tactical_reasons'] = tuple(sorted({reason for _, _, _, reason in candidates}))
+        return masked
+
 
     def neutral_overflow_fallback(self, state, observation):
         """Spend a safe neutral card when a near-cap model WAIT would leak elixir.
@@ -2617,7 +2869,6 @@ class FeatureAdapter:
                 SKELETONS: 1,
                 ICE_GOLEM: 2,
                 THE_LOG: 3,
-                MUSKETEER: 4,
             }
         else:
             priority = {
@@ -2655,18 +2906,30 @@ class FeatureAdapter:
             if not isinstance(cost, (int, float)):
                 continue
 
+            tactical = None
+            if cid != HOG_RIDER:
+                tactical = self._overflow_position_candidates(
+                    cid,
+                    entry,
+                    phase='neutral',
+                    reasons=reasons,
+                )
+                if not tactical:
+                    continue
+
             candidates.append((
                 priority[cid],
                 slot,
                 cid,
                 float(cost),
                 entry,
+                tactical,
             ))
 
         if not candidates:
             return None
 
-        _, slot, cid, cost, entry = min(candidates)
+        _, slot, cid, cost, entry, tactical = min(candidates)
 
         enemy_princess = [
             tower
@@ -2719,38 +2982,30 @@ class FeatureAdapter:
             )
             mode = 'cheap_cycle'
 
-        subcell = (
-            entry.get('model_subcell_offset')
-            or (0.0, 0.0)
-        )
+        subcell = entry.get('model_subcell_offset') or (0.0, 0.0)
         dx = float(subcell[0] or 0.0)
         dy = float(subcell[1] or 0.0)
         sign = 1.0 if self.actor_owner == 0 else -1.0
-        legal = []
-
-        for gy, row in enumerate(entry['row_major']):
-            for gx, allowed in enumerate(row):
-                if not allowed:
-                    continue
-
-                wx = (
-                    gx + 0.5 + sign * dx
-                ) * 1000.0
-                wy = (
-                    gy + 0.5 + sign * dy
-                ) * 1000.0
-                depth = self._defensive_depth(wy)
-                score = (
-                    (wx - preferred_x) ** 2
-                    + 0.4
-                    * (depth - preferred_depth) ** 2
-                )
-                legal.append((score, gx, gy))
-
-        if not legal:
-            return None
-
-        _, gx, gy = min(legal)
+        if tactical is not None:
+            _, gx, gy, tactical_reason = min(tactical)
+        else:
+            legal = []
+            for gy, row in enumerate(entry['row_major']):
+                for gx, allowed in enumerate(row):
+                    if not allowed:
+                        continue
+                    wx = (gx + 0.5 + sign * dx) * 1000.0
+                    wy = (gy + 0.5 + sign * dy) * 1000.0
+                    depth = self._defensive_depth(wy)
+                    score = (
+                        (wx - preferred_x) ** 2
+                        + 0.4 * (depth - preferred_depth) ** 2
+                    )
+                    legal.append((score, gx, gy))
+            if not legal:
+                return None
+            _, gx, gy = min(legal)
+            tactical_reason = 'hog_pressure'
 
         return ActionV1(
             owner=state.local_owner,
@@ -2771,6 +3026,7 @@ class FeatureAdapter:
                     entry.get('form_code', 0) or 0),
                 'neutral_overflow_fallback': True,
                 'neutral_overflow_mode': mode,
+                'neutral_overflow_tactical_reason': tactical_reason,
             },
         )
 
@@ -2855,6 +3111,13 @@ class FeatureAdapter:
                 FIREBALL: 6,
             }
 
+        lane = (
+            reasons.get('incoming_push_lane')
+            or reasons.get('backfield_commitment_lane')
+            or reasons.get('defensive_threat_lane')
+            or reasons.get('prelock_lane')
+        )
+
         candidates = []
 
         for raw_slot in safe_slots:
@@ -2882,26 +3145,37 @@ class FeatureAdapter:
             if not isinstance(cost, (int, float)):
                 continue
 
+            tactical = None
+            if cid in (CANNON, THE_LOG, SKELETONS, ICE_SPIRIT, ICE_GOLEM):
+                tactical = self._overflow_position_candidates(
+                    cid,
+                    entry,
+                    phase=str(
+                        reasons.get('strategy_phase')
+                        or ('prepare_defense'
+                            if reasons.get('incoming_push_active')
+                            else 'defend')
+                    ),
+                    lane=lane,
+                    reasons=reasons,
+                )
+                if not tactical:
+                    continue
+
             candidates.append((
                 priority.get(cid, 99),
                 slot,
                 cid,
                 float(cost),
                 entry,
+                tactical,
             ))
 
         if not candidates:
             return None
 
-        _, slot, cid, cost, entry = min(
+        _, slot, cid, cost, entry, tactical = min(
             candidates)
-
-        lane = (
-            reasons.get('incoming_push_lane')
-            or reasons.get('backfield_commitment_lane')
-            or reasons.get('defensive_threat_lane')
-            or reasons.get('prelock_lane')
-        )
 
         if (
             cid == HOG_RIDER
@@ -2944,38 +3218,26 @@ class FeatureAdapter:
             else -1.0
         )
 
-        legal = []
-
-        for gy, row in enumerate(
-                entry['row_major']):
-            for gx, allowed in enumerate(row):
-                if not allowed:
-                    continue
-
-                wx = (
-                    gx + 0.5 + sign * dx
-                ) * 1000.0
-
-                wy = (
-                    gy + 0.5 + sign * dy
-                ) * 1000.0
-
-                depth = self._defensive_depth(
-                    wy)
-
-                score = (
-                    (wx - preferred_x) ** 2
-                    + 0.4
-                    * (depth - preferred_depth) ** 2
-                )
-
-                legal.append(
-                    (score, gx, gy))
-
-        if not legal:
-            return None
-
-        _, gx, gy = min(legal)
+        if tactical is not None:
+            _, gx, gy, tactical_reason = min(tactical)
+        else:
+            legal = []
+            for gy, row in enumerate(entry['row_major']):
+                for gx, allowed in enumerate(row):
+                    if not allowed:
+                        continue
+                    wx = (gx + 0.5 + sign * dx) * 1000.0
+                    wy = (gy + 0.5 + sign * dy) * 1000.0
+                    depth = self._defensive_depth(wy)
+                    score = (
+                        (wx - preferred_x) ** 2
+                        + 0.4 * (depth - preferred_depth) ** 2
+                    )
+                    legal.append((score, gx, gy))
+            if not legal:
+                return None
+            _, gx, gy = min(legal)
+            tactical_reason = 'formation'
 
         return ActionV1(
             owner=state.local_owner,
@@ -2996,6 +3258,7 @@ class FeatureAdapter:
                     entry.get('form_code', 0) or 0),
                 'defense_overflow_fallback': True,
                 'defense_overflow_mode': mode,
+                'defense_overflow_tactical_reason': tactical_reason,
             },
         )
 
@@ -3671,6 +3934,13 @@ class FeatureAdapter:
             attack_opportunity is not None
             and attack_opportunity.get('release_hog') is True
         )
+        hog_overflow_release = bool(
+            hog_opportunity_release
+            and attack_opportunity.get('kind') not in (
+                'anti_overflow',
+                'heavy_commit',
+            )
+        )
         hog_opportunity_lane = (
             attack_opportunity.get('lane') if attack_opportunity else None
         )
@@ -3866,6 +4136,18 @@ class FeatureAdapter:
             attack_window.get('plays_until_return') if attack_window else None)
         self.quality['active_enemy_building_count'] = len(self._active_enemy_buildings)
         self.quality['opponent_exact_play_count'] = self._opponent_exact_play_count
+        overflow_context = {
+            'strategy_phase': strategy_phase,
+            'incoming_push_active': bool(incoming_push),
+            'incoming_push_lane': (
+                incoming_push.get('lane') if incoming_push else None),
+            'incoming_push_depth': (
+                incoming_push.get('core_depth') if incoming_push else None),
+            'defensive_threat_lane': (
+                defensive_lane_gate['threat_lane']
+                if defensive_lane_gate else None),
+            'cannon_prebuild_allowed': bool(cannon_prebuild_allowed),
+        }
         for slot, cid in slots.items():
             spec = self.bundle.card_specs[cid]
             if selections is not None:
@@ -4222,6 +4504,59 @@ class FeatureAdapter:
                     entry['counter_assignment_unenforceable_group_id'] = (
                         assigned_counter['threat_group_id'])
 
+            # The ordinary action mask describes legality.  At high elixir we
+            # additionally remove target-free overflow placements so the model
+            # cannot turn a WAIT fallback into a random tower-front cycle.
+            tactical_overflow_card = cid in (
+                CANNON, THE_LOG, SKELETONS, ICE_SPIRIT, ICE_GOLEM)
+            if (
+                tactical_overflow_card
+                and (
+                    (
+                        cid == THE_LOG
+                        and (
+                            defense_overflow_active
+                            or neutral_overflow_active
+                        )
+                    )
+                    or (
+                        cid == CANNON
+                        and strategy_phase in ('neutral', 'counterpush')
+                        and incoming_push is None
+                        and not defensive_pressure
+                        and (
+                            defense_overflow_active
+                            or neutral_overflow_active
+                        )
+                    )
+                    or (
+                        cid in (SKELETONS, ICE_SPIRIT, ICE_GOLEM)
+                        and neutral_overflow_active
+                    )
+                )
+            ):
+                tactical_entry = self._mask_to_overflow_tactical_positions(
+                    entry,
+                    cid,
+                    phase=strategy_phase,
+                    lane=(
+                        incoming_push.get('lane')
+                        if incoming_push else
+                        defensive_lane_gate['threat_lane']
+                        if defensive_lane_gate else None
+                    ),
+                    reasons=overflow_context,
+                )
+                if tactical_entry is None:
+                    entry = dict(entry)
+                    entry['row_major'] = tuple(
+                        tuple(False for _ in row)
+                        for row in entry['row_major'])
+                    entry['overflow_tactical_positions'] = False
+                    entry['overflow_tactical_reasons'] = ()
+                else:
+                    entry = tactical_entry
+
             playable[slot] = any(any(row) for row in entry['row_major'])
             slot_reasons[str(slot)] = 'playable' if playable[slot] else 'no_legal_position'
             if playable[slot]:
@@ -4320,7 +4655,7 @@ class FeatureAdapter:
                         and (
                             (
                                 incoming_push is not None
-                                and hog_opportunity_release
+                                and hog_overflow_release
                             )
                             or (
                                 incoming_push is None
@@ -4392,6 +4727,31 @@ class FeatureAdapter:
                                 else 'backfield_cycle'
                             )
 
+
+                if defense_overflow_safe_slots:
+                    tactical_safe_slots = []
+                    tactical_lane = (
+                        incoming_push.get('lane')
+                        if incoming_push else
+                        defensive_lane_gate['threat_lane']
+                        if defensive_lane_gate else None
+                    )
+                    for safe_slot in defense_overflow_safe_slots:
+                        safe_cid = int(slots.get(safe_slot, -1))
+                        safe_entry = masks.get(str(safe_slot))
+                        if safe_cid in (
+                                CANNON, THE_LOG, SKELETONS,
+                                ICE_SPIRIT, ICE_GOLEM):
+                            if not self._overflow_position_candidates(
+                                    safe_cid,
+                                    safe_entry,
+                                    phase=strategy_phase,
+                                    lane=tactical_lane,
+                                    reasons=overflow_context):
+                                continue
+                        tactical_safe_slots.append(safe_slot)
+                    defense_overflow_safe_slots = sorted(
+                        tactical_safe_slots)
 
                 if defense_overflow_safe_slots:
                     # Overflow is a WAIT fallback, not a second policy. Keep
