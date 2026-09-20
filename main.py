@@ -61,8 +61,19 @@ class CustomCardDeployAgent:
         self.log_path = Path(log_path or config.BASE_DIR / 'logs' / (time.strftime('%Y%m%d-%H%M%S') + '.jsonl'))
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.stream = self.log_path.open('a', encoding='utf-8', buffering=1)
-        self.executor = ActionExecutor(self.actuator, self.log, dry_run=dry_run,
-            on_ability_ack=self.adapter.record_ability_execution, max_actions=max_actions)
+
+        def live_card_cost(card_id):
+            spec = self.adapter.bundle.card_specs.get(int(card_id))
+            return float(spec.elixir_cost) if spec is not None else 0.0
+
+        self.executor = ActionExecutor(
+            self.actuator,
+            self.log,
+            dry_run=dry_run,
+            on_ability_ack=self.adapter.record_ability_execution,
+            max_actions=max_actions,
+            card_cost_resolver=live_card_cost,
+        )
         self.log('model_loading', checkpoint=str(checkpoint), device=device_str,
                  observation_profile=observation_profile, experimental_origins=experimental_origins)
         self.engine = None
