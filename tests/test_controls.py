@@ -133,6 +133,57 @@ class LifecycleTests(unittest.TestCase):
                  evidence='probe_idle_unknown_screen', samples=2),
             lifecycle.log.call_args_list)
 
+    def test_unknown_active_probe_still_rejected_without_terminal(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': True,
+        }))
+        lifecycle.calibration = {'continue_button': (540, 1710)}
+        lifecycle._tap = Mock()
+
+        with patch('bridge.lifecycle_screen.read_screen',
+                   return_value=('unknown', None)), \
+                patch('live_lifecycle.time.sleep'):
+            with self.assertRaisesRegex(
+                    LifecycleError, 'Active battle detected'):
+                lifecycle.return_to_lobby(timeout_seconds=5)
+
+        lifecycle._tap.assert_not_called()
+
+    def test_terminal_confirmed_ignores_stale_active_probe_and_recovers(self):
+        lifecycle = LiveLifecycle.__new__(LiveLifecycle)
+        lifecycle.poll_interval = 0
+        lifecycle.post_result_delay = 0
+        lifecycle.log = Mock()
+        lifecycle.probe = Mock(query=Mock(return_value={
+            'in_battle': True,
+            'battle_result': {'finalized': True},
+        }))
+        lifecycle.calibration = {'continue_button': (540, 1710)}
+        lifecycle._tap = Mock()
+
+        with patch('bridge.lifecycle_screen.read_screen', side_effect=[
+                ('unknown', None), ('unknown', None),
+                ('lobby', (540, 1490)), ('lobby', (540, 1490))]), \
+                patch('live_lifecycle.time.sleep'):
+            lifecycle.return_to_lobby(
+                timeout_seconds=5,
+                terminal_confirmed=True,
+            )
+
+        lifecycle._tap.assert_called_once_with(
+            (540, 1710), 'unknown-result-dismiss')
+        self.assertIn(
+            call(
+                'lobby_probe_stale_active_after_terminal',
+                evidence='native_world_finalized',
+                samples=2,
+            ),
+            lifecycle.log.call_args_list,
+        )
+
     def test_unknown_result_gets_one_configured_recovery_tap(self):
         lifecycle = LiveLifecycle.__new__(LiveLifecycle)
         lifecycle.poll_interval = 0

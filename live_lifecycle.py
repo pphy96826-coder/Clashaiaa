@@ -234,7 +234,9 @@ class LiveLifecycle:
             time.sleep(min(self.poll_interval, max(.01, deadline - time.monotonic())))
         return False
 
-    def return_to_lobby(self, *, timeout_seconds=20.0) -> None:
+    def return_to_lobby(
+            self, *, timeout_seconds=20.0,
+            terminal_confirmed=False) -> None:
         from bridge.lifecycle_screen import read_screen
         deadline = time.monotonic() + timeout_seconds
         previous = None
@@ -285,10 +287,15 @@ class LiveLifecycle:
                     else:
                         if isinstance(runtime, dict):
                             if runtime.get('in_battle') is True:
-                                raise LifecycleError(
-                                    'Active battle detected while screen is unknown; '
-                                    'use attach-active instead of starting a new battle'
-                                )
+                                if not terminal_confirmed:
+                                    raise LifecycleError(
+                                        'Active battle detected while screen is unknown; '
+                                        'use attach-active instead of starting a new battle'
+                                    )
+                                self.log(
+                                    'lobby_probe_stale_active_after_terminal',
+                                    evidence='native_world_finalized',
+                                    samples=unknown_samples)
                             if (runtime.get('in_battle') is False
                                     and not runtime.get('battle_result')):
                                 self.log(

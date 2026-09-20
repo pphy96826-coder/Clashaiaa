@@ -531,7 +531,8 @@ class CustomCardDeployAgent:
                         break
                     if lifecycle is not None:
                         try:
-                            lifecycle.return_to_lobby()
+                            lifecycle.return_to_lobby(
+                                terminal_confirmed=True)
                         except LifecycleError as exc:
                             self.log('lifecycle_error', phase='return-to-lobby', error=str(exc))
                             break
