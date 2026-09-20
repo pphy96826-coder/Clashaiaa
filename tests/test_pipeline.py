@@ -629,42 +629,52 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(
             o.action_mask.reasons['strategy_phase'],
-            'prepare_defense',
+            'neutral',
         )
         self.assertTrue(
             o.action_mask.reasons[
                 'backfield_commitment_active'])
-        self.assertTrue(
+        self.assertFalse(
             o.action_mask.reasons[
                 'backfield_patience_active'])
+        self.assertTrue(
+            o.action_mask.reasons[
+                'backfield_commitment_advisory'])
         self.assertEqual(
             o.action_mask.reasons[
                 'backfield_commitment_lane'],
             'left',
         )
+        self.assertFalse(
+            o.action_mask.reasons['neutral_patience_active'])
 
-        # Cheap cycle remains available; the model cannot answer a distant
-        # Musketeer by sinking our own Musketeer/Ice Golem elsewhere or by
-        # wasting Cannon lifetime.
+        # A visible medium commitment is context, not a phase takeover.
+        # Leave normal tactical choices to the model.
         self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertTrue(o.action_mask.hand_slots[3])
 
-        self.assertFalse(o.action_mask.hand_slots[1])
-        self.assertEqual(
-            o.action_mask.reasons['slot_reasons']['1'],
-            'strategy_hold_backfield_musketeer',
+    def test_medium_backfield_commitment_does_not_reapply_neutral_patience(self):
+        a, s = self.adapter()
+        s.elixir = 7.0
+        add_enemy(
+            s, 9347, 3500, 26000,
+            card_id=26000014, hp=1000,
         )
+        s.tick += 1
 
-        self.assertFalse(o.action_mask.hand_slots[2])
-        self.assertEqual(
-            o.action_mask.reasons['slot_reasons']['2'],
-            'strategy_hold_backfield_cannon',
-        )
+        _, o = a.tensorize(s)
 
-        self.assertFalse(o.action_mask.hand_slots[3])
         self.assertEqual(
-            o.action_mask.reasons['slot_reasons']['3'],
-            'strategy_hold_backfield_ice_golem',
+            o.action_mask.reasons['strategy_phase'],
+            'neutral',
         )
+        self.assertTrue(
+            o.action_mask.reasons['backfield_commitment_advisory'])
+        self.assertFalse(
+            o.action_mask.reasons['neutral_patience_active'])
+        self.assertTrue(o.action_mask.hand_slots[2])
 
     def test_backfield_overflow_cycles_instead_of_forcing_core_defender(self):
         raw = opening()
@@ -697,26 +707,26 @@ class AdapterTests(unittest.TestCase):
 
         self.assertEqual(
             o.action_mask.reasons['strategy_phase'],
-            'prepare_defense',
+            'neutral',
         )
         self.assertFalse(
             o.action_mask.reasons['incoming_push_active'])
-        self.assertTrue(
+        self.assertFalse(
             o.action_mask.reasons['backfield_patience_active'])
         self.assertTrue(
+            o.action_mask.reasons['backfield_commitment_advisory'])
+        self.assertTrue(
+            o.action_mask.reasons['neutral_overflow_active'])
+        self.assertFalse(
             o.action_mask.reasons['defense_overflow_forced'])
-        self.assertEqual(
-            o.action_mask.reasons['defense_overflow_mode'],
-            'backfield_cycle',
-        )
-        self.assertEqual(
-            o.action_mask.reasons['defense_overflow_safe_slots'],
-            (0,),
-        )
         self.assertTrue(o.action_mask.hand_slots[0])
-        self.assertFalse(o.action_mask.hand_slots[1])
-        self.assertFalse(o.action_mask.hand_slots[2])
-        self.assertFalse(o.action_mask.hand_slots[3])
+        self.assertTrue(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertTrue(o.action_mask.hand_slots[3])
+
+        fallback = a.neutral_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000010)
 
     def test_backfield_hard_cap_uses_hog_when_no_cheap_cycle_exists(self):
         raw = opening()
@@ -747,28 +757,17 @@ class AdapterTests(unittest.TestCase):
 
         _, o = a.tensorize(s)
 
-        self.assertTrue(
+        self.assertFalse(
             o.action_mask.reasons['backfield_patience_active'])
         self.assertTrue(
-            o.action_mask.reasons['defense_overflow_forced'])
-        self.assertEqual(
-            o.action_mask.reasons['defense_overflow_mode'],
-            'backfield_cycle',
-        )
-        self.assertEqual(
-            o.action_mask.reasons['defense_overflow_safe_slots'],
-            (0,),
-        )
+            o.action_mask.reasons['backfield_commitment_advisory'])
+        self.assertTrue(
+            o.action_mask.reasons['neutral_overflow_active'])
         self.assertFalse(
-            o.action_mask.reasons[
-                'backfield_hard_cap_musketeer_release'])
-        fallback = a.defense_overflow_fallback(s, o)
+            o.action_mask.reasons['defense_overflow_forced'])
+        fallback = a.neutral_overflow_fallback(s, o)
         self.assertIsNotNone(fallback)
         self.assertEqual(fallback.card_id, 26000021)
-        self.assertGreaterEqual(
-            action_world(fallback)[0],
-            9000.0,
-        )
 
     def test_backfield_hard_cap_uses_musketeer_as_last_resort(self):
         raw = opening()
@@ -799,27 +798,21 @@ class AdapterTests(unittest.TestCase):
 
         _, o = a.tensorize(s)
 
-        self.assertTrue(
+        self.assertFalse(
             o.action_mask.reasons[
                 'backfield_hard_cap_musketeer_release'])
+        self.assertFalse(
+            o.action_mask.reasons['backfield_patience_active'])
         self.assertTrue(
-            o.action_mask.reasons['defense_overflow_forced'])
-        self.assertEqual(
-            o.action_mask.reasons['defense_overflow_mode'],
-            'backfield_cycle',
-        )
-        self.assertEqual(
-            o.action_mask.reasons['defense_overflow_safe_slots'],
-            (0,),
-        )
+            o.action_mask.reasons['neutral_overflow_active'])
         self.assertTrue(o.action_mask.hand_slots[0])
-        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[1])
         self.assertTrue(o.action_mask.hand_slots[2])
-        self.assertFalse(o.action_mask.hand_slots[3])
+        self.assertTrue(o.action_mask.hand_slots[3])
 
-        fallback = a.defense_overflow_fallback(s, o)
+        fallback = a.neutral_overflow_fallback(s, o)
         self.assertIsNotNone(fallback)
-        self.assertEqual(fallback.card_id, 26000014)
+        self.assertEqual(fallback.card_id, 26000038)
 
     def test_heavy_prepare_overflow_fallback_does_not_mask_hog_choice(self):
         a, s = self.adapter()
@@ -873,20 +866,20 @@ class AdapterTests(unittest.TestCase):
 
         _, o = a.tensorize(s)
 
-        self.assertEqual(
-            o.action_mask.reasons['defense_overflow_mode'],
-            'backfield_cycle',
-        )
+        self.assertIsNone(
+            o.action_mask.reasons['defense_overflow_mode'])
         self.assertEqual(
             o.action_mask.reasons['defense_overflow_safe_slots'],
-            (0, 2),
+            (),
         )
+        self.assertTrue(
+            o.action_mask.reasons['neutral_overflow_active'])
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertTrue(o.action_mask.hand_slots[1])
         self.assertTrue(o.action_mask.hand_slots[2])
-        self.assertFalse(o.action_mask.hand_slots[3])
+        self.assertTrue(o.action_mask.hand_slots[3])
 
-        fallback = a.defense_overflow_fallback(s, o)
+        fallback = a.neutral_overflow_fallback(s, o)
         self.assertIsNotNone(fallback)
         self.assertEqual(fallback.card_id, 26000010)
 
@@ -2313,8 +2306,8 @@ class AdapterTests(unittest.TestCase):
         for world_x, world_y in allowed:
             trail = 12000.0 - world_y
             self.assertGreaterEqual(trail, 500.0)
-            self.assertLessEqual(trail, 2500.0)
-            self.assertLessEqual(abs(world_x - 14500.0), 1500.0)
+            self.assertLessEqual(trail, 4000.0)
+            self.assertLessEqual(abs(world_x - 14500.0), 2500.0)
 
     def test_musketeer_counterpush_does_not_use_ice_golem_trailing_corridor(self):
         a, s = self.adapter()

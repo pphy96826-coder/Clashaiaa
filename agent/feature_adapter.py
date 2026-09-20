@@ -59,8 +59,8 @@ LOW_ELIXIR_ATTACK_MAX_WIDTH = 1.0
 COUNTERPUSH_MIN_PROGRESS = 9000.0
 COUNTERPUSH_MAX_PROGRESS = 17000.0
 COUNTERPUSH_ICE_GOLEM_HOG_MIN_TRAIL = 500.0
-COUNTERPUSH_ICE_GOLEM_HOG_MAX_TRAIL = 2500.0
-COUNTERPUSH_ICE_GOLEM_HOG_MAX_LATERAL = 1500.0
+COUNTERPUSH_ICE_GOLEM_HOG_MAX_TRAIL = 4000.0
+COUNTERPUSH_ICE_GOLEM_HOG_MAX_LATERAL = 2500.0
 INCOMING_PUSH_MIN_COST = 5.0
 INCOMING_PUSH_BACKFIELD_DEPTH = 22000.0
 INCOMING_PUSH_DEFENDER_RELEASE_DEPTH = 18000.0
@@ -2916,11 +2916,11 @@ class FeatureAdapter:
             and near_tower_pressure is None
         )
 
-        backfield_patience = (
-            backfield_commitment is not None
-            and not defensive_pressure
-            and near_tower_pressure is None
-        )
+        # A generic 3/4-elixir backfield troop is useful public context, but
+        # it is not strong enough evidence to seize control of the whole
+        # policy phase. Keep tracking it for diagnostics while leaving card
+        # choice to the model. Heavy 5+ elixir cores still use incoming_push.
+        backfield_patience = False
 
         backfield_depth = (
             float(backfield_commitment.get('depth'))
@@ -3168,11 +3168,13 @@ class FeatureAdapter:
         ]
         neutral_patience_relaxed_no_cycle = bool(
             strategy_phase == 'neutral'
+            and backfield_commitment is None
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
             and not neutral_patience_safe_slots
         )
         neutral_patience = (
             strategy_phase == 'neutral'
+            and backfield_commitment is None
             and float(elixir) < NEUTRAL_PATIENCE_RELEASE_ELIXIR
             and bool(neutral_patience_safe_slots)
         )
@@ -3230,6 +3232,9 @@ class FeatureAdapter:
             if backfield_commitment else None)
         self.quality['backfield_patience_active'] = bool(
             backfield_patience)
+        self.quality['backfield_commitment_advisory'] = bool(
+            backfield_commitment is not None
+            and incoming_push is None)
         self.quality['defense_overflow_active'] = bool(
             defense_overflow_active)
         self.quality['neutral_overflow_active'] = bool(
@@ -3915,6 +3920,9 @@ class FeatureAdapter:
                          if backfield_commitment else None),
                      'backfield_patience_active': bool(
                          backfield_patience),
+                     'backfield_commitment_advisory': bool(
+                         backfield_commitment is not None
+                         and incoming_push is None),
                      'backfield_hard_cap_musketeer_release': bool(
                          backfield_hard_cap_musketeer_release),
                      'defense_overflow_active': bool(
