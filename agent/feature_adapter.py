@@ -103,7 +103,9 @@ BACKFIELD_CANNON_RELEASE_DEPTH = 12500.0
 # body only when no cheaper safe release is available.
 DEFENSE_OVERFLOW_ELIXIR = 9.5
 DEFENSE_OVERFLOW_HARD_CAP_ELIXIR = 9.9
-DEFENSE_OVERFLOW_SAFE_CYCLE_CARDS = frozenset((SKELETONS, ICE_SPIRIT))
+DEFENSE_OVERFLOW_SAFE_CYCLE_CARDS = frozenset((
+    SKELETONS, ICE_SPIRIT, THE_LOG,
+))
 LOW_VALUE_DEFENSE_MAX_COST = 1.0
 LOW_VALUE_DEFENSE_HELD_CARDS = frozenset((
     MUSKETEER, CANNON, FIREBALL, ICE_GOLEM,
@@ -2167,7 +2169,10 @@ class FeatureAdapter:
             priority = {
                 ICE_SPIRIT: 0,
                 SKELETONS: 1,
-                CANNON: 2,
+                THE_LOG: 2,
+                HOG_RIDER: 3,
+                CANNON: 4,
+                MUSKETEER: 5,
             }
 
         elif mode == 'cannon_prebuild':
@@ -2244,6 +2249,13 @@ class FeatureAdapter:
             or reasons.get('prelock_lane')
         )
 
+        if (
+            cid == HOG_RIDER
+            and mode == 'backfield_cycle'
+            and lane in ('left', 'right')
+        ):
+            lane = 'right' if lane == 'left' else 'left'
+
         preferred_x = (
             3500.0
             if lane == 'left'
@@ -2253,7 +2265,9 @@ class FeatureAdapter:
         )
 
         preferred_depth = (
-            5500.0
+            14500.0
+            if cid == HOG_RIDER
+            else 5500.0
             if cid == MUSKETEER
             else 8000.0
             if cid == CANNON
@@ -2870,6 +2884,31 @@ class FeatureAdapter:
         heavy_priority_card = heavy_priority.get('card_id')
         blocked_slot_set = {int(v) for v in blocked_slots}
 
+        def backfield_escape_slot_available(slot, cid):
+            slot = int(slot)
+            cid = int(cid)
+            if slot in blocked_slot_set:
+                return False
+            spec = self.bundle.card_specs.get(cid)
+            if spec is None or float(spec.elixir_cost) > float(elixir):
+                return False
+            if cid in DEFENSE_OVERFLOW_SAFE_CYCLE_CARDS:
+                return True
+            return (
+                cid == HOG_RIDER
+                and not self._active_enemy_buildings
+            )
+
+        backfield_hard_cap_musketeer_release = bool(
+            backfield_patience
+            and incoming_push is None
+            and defense_overflow_hard_cap
+            and not any(
+                backfield_escape_slot_available(slot, cid)
+                for slot, cid in slots.items()
+            )
+        )
+
         def neutral_cycle_slot_available(slot, cid):
             cid = int(cid)
             slot = int(slot)
@@ -3244,6 +3283,7 @@ class FeatureAdapter:
                 and cid == MUSKETEER
                 and backfield_depth
                     > BACKFIELD_MUSKETEER_RELEASE_DEPTH
+                and not backfield_hard_cap_musketeer_release
             ):
                 slot_reasons[str(slot)] = (
                     'strategy_hold_backfield_musketeer'
@@ -3433,11 +3473,32 @@ class FeatureAdapter:
                     hog_slots = sorted(
                         slot
                         for slot, cid in slots.items()
-                        if incoming_push is not None
-                        and hog_opportunity_release
-                        and playable[slot]
+                        if playable[slot]
                         and cid == HOG_RIDER
                         and not self._active_enemy_buildings
+                        and (
+                            (
+                                incoming_push is not None
+                                and hog_opportunity_release
+                            )
+                            or (
+                                incoming_push is None
+                                and backfield_patience
+                                and defense_overflow_hard_cap
+                            )
+                        )
+                    )
+
+                    backfield_musketeer_slots = sorted(
+                        slot
+                        for slot, cid in slots.items()
+                        if (
+                            incoming_push is None
+                            and backfield_patience
+                            and backfield_hard_cap_musketeer_release
+                            and playable[slot]
+                            and cid == MUSKETEER
+                        )
                     )
 
                     # If the tank is already close enough that the Cannon
@@ -3459,6 +3520,7 @@ class FeatureAdapter:
                             cycle_slots
                             + cannon_slots
                             + hog_slots
+                            + backfield_musketeer_slots
                         )
                         defense_overflow_mode = (
                             'cycle_then_prebuild'
@@ -3475,10 +3537,18 @@ class FeatureAdapter:
                         )
 
                     else:
-                        if hog_slots:
-                            defense_overflow_safe_slots = hog_slots
+                        last_resort_slots = sorted(
+                            hog_slots
+                            + backfield_musketeer_slots
+                        )
+                        if last_resort_slots:
+                            defense_overflow_safe_slots = (
+                                last_resort_slots
+                            )
                             defense_overflow_mode = (
                                 'heavy_commit_hog_punish'
+                                if incoming_push is not None
+                                else 'backfield_cycle'
                             )
 
 
@@ -3591,6 +3661,8 @@ class FeatureAdapter:
                          if backfield_commitment else None),
                      'backfield_patience_active': bool(
                          backfield_patience),
+                     'backfield_hard_cap_musketeer_release': bool(
+                         backfield_hard_cap_musketeer_release),
                      'defense_overflow_active': bool(
                          defense_overflow_active),
                      'neutral_overflow_active': bool(

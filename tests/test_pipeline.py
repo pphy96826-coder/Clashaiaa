@@ -718,6 +718,109 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(o.action_mask.hand_slots[2])
         self.assertFalse(o.action_mask.hand_slots[3])
 
+    def test_backfield_hard_cap_uses_hog_when_no_cheap_cycle_exists(self):
+        raw = opening()
+        hand = (
+            26000021,  # Hog Rider
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'backfield-hard-cap-hog')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9341, 3500, 26000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons['backfield_patience_active'])
+        self.assertTrue(
+            o.action_mask.reasons['defense_overflow_forced'])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_mode'],
+            'backfield_cycle',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (0,),
+        )
+        self.assertFalse(
+            o.action_mask.reasons[
+                'backfield_hard_cap_musketeer_release'])
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000021)
+        self.assertGreaterEqual(
+            action_world(fallback)[0],
+            9000.0,
+        )
+
+    def test_backfield_hard_cap_uses_musketeer_as_last_resort(self):
+        raw = opening()
+        hand = (
+            26000014,  # Musketeer
+            27000000,  # Cannon
+            28000000,  # Fireball
+            26000038,  # Ice Golem
+        )
+        raw['players'][0]['hand'] = [
+            {'slot': i, 'card_id': cid}
+            for i, cid in enumerate(hand)
+        ]
+        raw['players'][0]['cycle'] = [
+            cid for cid in HOG_26_DECK
+            if cid not in hand
+        ]
+
+        s = ProbeClient(account_id=123).parse(raw)
+        a = FeatureAdapter()
+        a.reset_match(s, 'backfield-hard-cap-musketeer')
+        s.elixir = 10.0
+        add_enemy(
+            s, 9342, 3500, 26000,
+            card_id=26000014, hp=1000,
+        )
+        s.tick += 1
+
+        _, o = a.tensorize(s)
+
+        self.assertTrue(
+            o.action_mask.reasons[
+                'backfield_hard_cap_musketeer_release'])
+        self.assertTrue(
+            o.action_mask.reasons['defense_overflow_forced'])
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_mode'],
+            'backfield_cycle',
+        )
+        self.assertEqual(
+            o.action_mask.reasons['defense_overflow_safe_slots'],
+            (0,),
+        )
+        self.assertTrue(o.action_mask.hand_slots[0])
+        self.assertFalse(o.action_mask.hand_slots[1])
+        self.assertTrue(o.action_mask.hand_slots[2])
+        self.assertFalse(o.action_mask.hand_slots[3])
+
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 26000014)
+
     def test_heavy_prepare_overflow_fallback_does_not_mask_hog_choice(self):
         a, s = self.adapter()
         s.elixir = 10.0
@@ -870,14 +973,14 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(
             o.action_mask.reasons[
                 'defense_overflow_safe_slots'],
-            (0,),
+            (0, 3),
         )
 
         self.assertTrue(o.action_mask.hand_slots[0])
         self.assertFalse(o.action_mask.hand_slots[1])
         self.assertFalse(o.action_mask.hand_slots[2])
-        # Log is not part of the structural fallback, but remains a legal
-        # model choice because overflow no longer rewrites the whole mask.
+        # Log is also a safe cheap-cycle fallback now; Skeletons still win
+        # the fallback priority when both are available.
         self.assertTrue(o.action_mask.hand_slots[3])
 
         fallback = a.defense_overflow_fallback(s, o)
@@ -918,11 +1021,11 @@ class AdapterTests(unittest.TestCase):
 
         self.assertTrue(
             o.action_mask.reasons['defense_overflow_hard_cap'])
-        self.assertFalse(
+        self.assertTrue(
             o.action_mask.reasons['defense_overflow_forced'])
         self.assertEqual(
             o.action_mask.reasons['defense_overflow_safe_slots'],
-            (),
+            (0,),
         )
         self.assertTrue(o.action_mask.kinds['wait'])
 
@@ -934,6 +1037,9 @@ class AdapterTests(unittest.TestCase):
             o.action_mask.reasons['slot_reasons']['3'],
             'strategy_hold_ice_golem_for_incoming_push',
         )
+        fallback = a.defense_overflow_fallback(s, o)
+        self.assertIsNotNone(fallback)
+        self.assertEqual(fallback.card_id, 28000011)
 
 
     def test_single_one_elixir_threat_holds_core_defense(self):
